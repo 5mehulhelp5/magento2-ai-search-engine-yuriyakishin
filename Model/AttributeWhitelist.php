@@ -13,9 +13,13 @@ use Magento\Framework\Serialize\SerializerInterface;
 /**
  * Merchant-driven list of attributes a caller may target in search:
  * Use in Search OR Use in Layered Navigation, non-empty for at least one
- * product, minus system attributes. Metadata only — cost does not depend
- * on catalog size beyond one indexed GROUP-BY per value table, and the
- * result is cached until EAV changes.
+ * product, minus system attributes. An attribute set on only part of
+ * the catalog is still offered — EngineFinder's terms query treats a
+ * missing value as neutral rather than a mismatch, so sparse coverage
+ * narrows what a term can confirm without wrongly excluding products
+ * the attribute was never about in the first place. Metadata only —
+ * cost does not depend on catalog size beyond one indexed GROUP-BY per
+ * value table, and the result is cached until EAV changes.
  */
 class AttributeWhitelist
 {

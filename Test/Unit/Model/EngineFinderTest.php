@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace Yu\AiSearchEngine\Test\Unit\Model;
 
-use Magento\Elasticsearch7\Model\Client\Elasticsearch as ElasticsearchClient;
+use Magento\AdvancedSearch\Model\Client\ClientInterface;
 use Magento\Elasticsearch\SearchAdapter\ConnectionManager;
 use Magento\Elasticsearch\SearchAdapter\SearchIndexNameResolver;
 use PHPUnit\Framework\TestCase;
@@ -44,8 +44,39 @@ class EngineFinderTest extends TestCase
         ], $this->options());
 
         $bool = $captured['body']['query']['bool'];
-        $this->assertSame(['match' => ['color' => ['query' => 'red', 'operator' => 'and', 'boost' => 2.0, 'fuzziness' => 'AUTO']]], $bool['must'][0]);
+        $this->assertSame(
+            [
+                'bool' => [
+                    'should' => [
+                        ['match' => ['color' => ['query' => 'red', 'operator' => 'and', 'boost' => 2.0, 'fuzziness' => 'AUTO']]],
+                        ['bool' => ['must_not' => ['exists' => ['field' => 'color']]]],
+                    ],
+                    'minimum_should_match' => 1,
+                ],
+            ],
+            $bool['must'][0]
+        );
+        // Excluded terms stay a bare match: a document missing the field
+        // already satisfies "not X" on its own, no exists-wrapping needed.
         $this->assertSame(['match' => ['color' => ['query' => 'blue', 'operator' => 'and', 'boost' => 1.0, 'fuzziness' => 'AUTO']]], $bool['must_not'][0]);
+    }
+
+    public function testFindByTermsMatchingTermDoesNotExcludeDocumentsMissingTheField(): void
+    {
+        // The whole point of the wrapping: a term on a sparsely-populated
+        // attribute must narrow among products that have it, not zero out
+        // every product that simply never had the attribute set.
+        [$finder, $client] = $this->makeFinder();
+        $captured = &$this->captureQuery($client, []);
+
+        $finder->findByTerms([
+            ['field' => 'gender_value', 'query' => 'Men', 'boost' => 1.0, 'exclude' => false],
+        ], $this->options());
+
+        $shouldClauses = $captured['body']['query']['bool']['must'][0]['bool']['should'];
+        $this->assertCount(2, $shouldClauses);
+        $this->assertArrayHasKey('match', $shouldClauses[0]);
+        $this->assertSame(['bool' => ['must_not' => ['exists' => ['field' => 'gender_value']]]], $shouldClauses[1]);
     }
 
     public function testFindByTermsWithOnlyExclusionsOmitsMustEntirely(): void
@@ -95,16 +126,16 @@ class EngineFinderTest extends TestCase
         }
     }
 
-    public function testRunFiltersInStockUsingIsOutOfStockEqualsOneMeaningInStock(): void
+    public function testRunFiltersInStockUsingIsOutOfStockEqualsZeroMeaningInStock(): void
     {
-        // Core quirk: the ES index field named is_out_of_stock actually
-        // stores (int)IS_SALABLE, so 1 means IN stock, not out of stock.
+        // Magento_InventoryElasticsearch\...\ProductDataMapperPlugin::afterMap()
+        // stores (int)!IS_SALABLE under this field name, so 0 means IN stock.
         [$finder, $client] = $this->makeFinder();
         $captured = &$this->captureQuery($client, []);
 
         $finder->findByQuery('x', [], $this->options(inStockOnly: true));
 
-        $this->assertContains(['term' => ['is_out_of_stock' => 1]], $captured['body']['query']['bool']['filter']);
+        $this->assertContains(['term' => ['is_out_of_stock' => 0]], $captured['body']['query']['bool']['filter']);
     }
 
     public function testRunOmitsStockFilterWhenNotRequested(): void
@@ -192,7 +223,7 @@ class EngineFinderTest extends TestCase
     {
         $indexResolver = $this->createMock(SearchIndexNameResolver::class);
         $indexResolver->method('getIndexName')->with(5, 'catalogsearch_fulltext')->willReturn('resolved_index_name');
-        $client = $this->createMock(ElasticsearchClient::class);
+        $client = $this->getMockBuilder(ClientInterface::class)->addMethods(['query'])->getMockForAbstractClass();
         $connectionManager = $this->createMock(ConnectionManager::class);
         $connectionManager->method('getConnection')->willReturn($client);
         $finder = new EngineFinder($connectionManager, $indexResolver, $this->createMock(SearchResultInterfaceFactory::class));
@@ -236,7 +267,8 @@ class EngineFinderTest extends TestCase
         $must = $captured['body']['query']['bool']['must'];
         $this->assertCount(2, $must);
         $this->assertArrayHasKey('multi_match', $must[0] + $must[1]);
-        $this->assertArrayHasKey('match', $must[0] + $must[1]);
+        // The term entry is exists-or-match wrapped, not a bare 'match'.
+        $this->assertArrayHasKey('bool', $must[0] + $must[1]);
     }
 
     public function testSearchOmitsKeywordsClauseWhenQueryIsEmpty(): void
@@ -253,7 +285,8 @@ class EngineFinderTest extends TestCase
 
         $must = $captured['body']['query']['bool']['must'];
         $this->assertCount(1, $must);
-        $this->assertArrayHasKey('match', $must[0]);
+        // The term entry is exists-or-match wrapped, not a bare 'match'.
+        $this->assertArrayHasKey('bool', $must[0]);
     }
 
     public function testSearchRequestsAggregationsWhenFacetFieldsGiven(): void
@@ -322,11 +355,18 @@ class EngineFinderTest extends TestCase
     }
 
     /**
-     * @return array{0: EngineFinder, 1: ElasticsearchClient&\PHPUnit\Framework\MockObject\MockObject}
+     * @return array{0: EngineFinder, 1: ClientInterface&\PHPUnit\Framework\MockObject\MockObject}
      */
     private function makeFinder(): array
     {
-        $client = $this->createMock(ElasticsearchClient::class);
+        // ConnectionManager::getConnection() returns whichever ES/OpenSearch
+        // version's client is installed -- ClientInterface is the one
+        // version-agnostic contract they all share, but it declares only
+        // testConnection(). addMethods() adds query() for mocking without
+        // pinning the test to a specific ES major version's client class.
+        $client = $this->getMockBuilder(ClientInterface::class)
+            ->addMethods(['query'])
+            ->getMockForAbstractClass();
         $connectionManager = $this->createMock(ConnectionManager::class);
         $connectionManager->method('getConnection')->willReturn($client);
         $indexResolver = $this->createMock(SearchIndexNameResolver::class);
@@ -344,7 +384,7 @@ class EngineFinderTest extends TestCase
     }
 
     /**
-     * @param ElasticsearchClient&\PHPUnit\Framework\MockObject\MockObject $client
+     * @param ClientInterface&\PHPUnit\Framework\MockObject\MockObject $client
      * @return array{index: string, body: array}
      */
     private function &captureQuery($client, array $response): array

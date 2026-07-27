@@ -129,7 +129,7 @@ class EngineFinder
         $must = [];
         $mustNot = [];
         foreach ($terms as $term) {
-            $clause = [
+            $matchClause = [
                 'match' => [
                     $term['field'] => [
                         'query' => $term['query'],
@@ -140,10 +140,28 @@ class EngineFinder
                 ],
             ];
             if ($term['exclude']) {
-                $mustNot[] = $clause;
-            } else {
-                $must[] = $clause;
+                // A missing field already satisfies "not X" on its own —
+                // must_not against a field the document doesn't have is a
+                // no-op match, so it needs no exists-aware wrapping.
+                $mustNot[] = $matchClause;
+                continue;
             }
+            // A product carrying no value at all for this attribute is
+            // neither confirmed nor contradicted by the term — many
+            // attributes are only ever set on part of the catalog, and a
+            // term has nothing to say about a product missing it. Only a
+            // value that's actually present and different counts as a
+            // real mismatch; absence must not be scored the same as a
+            // contradiction.
+            $must[] = [
+                'bool' => [
+                    'should' => [
+                        $matchClause,
+                        ['bool' => ['must_not' => ['exists' => ['field' => $term['field']]]]],
+                    ],
+                    'minimum_should_match' => 1,
+                ],
+            ];
         }
         $bool = [];
         if ($must !== []) {
@@ -170,9 +188,9 @@ class EngineFinder
             $filter[] = ['term' => ['category_ids' => $options->getCategoryId()]];
         }
         if ($options->isInStockOnly()) {
-            // Core quirk: inventory-elasticsearch stores (int)IS_SALABLE
-            // under the name is_out_of_stock, so 1 means IN stock.
-            $filter[] = ['term' => ['is_out_of_stock' => 1]];
+            // Magento_InventoryElasticsearch\...\ProductDataMapperPlugin::afterMap()
+            // stores (int)!IS_SALABLE under this field name, so 0 means IN stock.
+            $filter[] = ['term' => ['is_out_of_stock' => 0]];
         }
         // Same per-group price field Magento's own layered navigation
         // filters by; precision matches the storefront (reindex lag).

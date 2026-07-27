@@ -30,7 +30,9 @@
         "php": ">=8.1",
         "magento/framework": "*",
         "magento/module-elasticsearch": "*",
-        "magento/module-eav": "*"
+        "magento/module-eav": "*",
+        "magento/module-catalog": "*",
+        "magento/module-store": "*"
     },
     "license": [
         "MIT"

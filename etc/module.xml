@@ -3,6 +3,7 @@
         xsi:noNamespaceSchemaLocation="urn:magento:framework:Module/etc/module.xsd">
     <module name="Yu_AiSearchEngine">
         <sequence>
+            <module name="Magento_Catalog"/>
             <module name="Magento_Elasticsearch"/>
         </sequence>
     </module>
