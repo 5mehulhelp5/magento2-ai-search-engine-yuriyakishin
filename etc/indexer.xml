@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:framework:Indexer/etc/indexer.xsd">
+    <indexer id="yu_aisearchengine_vector" view_id="yu_aisearchengine_vector" class="Yu\AiSearchEngine\Model\Indexer\VectorIndexer">
+        <title translate="true">AI Search Vector Index</title>
+        <description translate="true">Embeds product name/short description/description and syncs the vectors to the semantic search index used by hybrid search.</description>
+    </indexer>
+</config>

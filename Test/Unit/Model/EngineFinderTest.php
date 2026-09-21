@@ -8,10 +8,14 @@ use Magento\AdvancedSearch\Model\Client\ClientInterface;
 use Magento\Elasticsearch\SearchAdapter\ConnectionManager;
 use Magento\Elasticsearch\SearchAdapter\SearchIndexNameResolver;
 use PHPUnit\Framework\TestCase;
+use Yu\AiLlm\Api\EmbeddingProviderInterface;
+use Yu\AiLlm\Model\LlmProviderException;
 use Yu\AiSearchEngine\Api\Data\SearchResultInterfaceFactory;
 use Yu\AiSearchEngine\Model\EngineFinder;
+use Yu\AiSearchEngine\Model\Indexer\VectorIndexManager;
 use Yu\AiSearchEngine\Model\QueryOptions;
 use Yu\AiSearchEngine\Model\SearchResult;
+use Yu\AiSearchEngine\Model\SemanticConfig;
 
 class EngineFinderTest extends TestCase
 {
@@ -226,7 +230,17 @@ class EngineFinderTest extends TestCase
         $client = $this->getMockBuilder(ClientInterface::class)->addMethods(['query'])->getMockForAbstractClass();
         $connectionManager = $this->createMock(ConnectionManager::class);
         $connectionManager->method('getConnection')->willReturn($client);
-        $finder = new EngineFinder($connectionManager, $indexResolver, $this->createMock(SearchResultInterfaceFactory::class));
+        $semanticConfig = $this->createMock(SemanticConfig::class);
+        $semanticConfig->method('isEnabled')->willReturn(false);
+        $finder = new EngineFinder(
+            $connectionManager,
+            $indexResolver,
+            $this->createMock(SearchResultInterfaceFactory::class),
+            $semanticConfig,
+            $this->createMock(EmbeddingProviderInterface::class),
+            $this->createMock(VectorIndexManager::class),
+            $this->createMock(\Psr\Log\LoggerInterface::class)
+        );
         $captured = &$this->captureQuery($client, []);
 
         $finder->findByQuery('x', [], $this->options(storeId: 5));
@@ -340,6 +354,142 @@ class EngineFinderTest extends TestCase
         $this->assertNull($result->getPricePercentile25());
     }
 
+    public function testFindByQueryCallsTheEngineOnceWhenSemanticSearchIsDisabled(): void
+    {
+        [$finder, $client] = $this->makeFinder();
+        $client->expects($this->once())->method('query')->willReturn(['hits' => ['hits' => [['_id' => '1', '_score' => 5.0]], 'max_score' => 5.0]]);
+
+        $ids = $finder->findByQuery('red jacket', ['name' => 5], $this->options());
+
+        $this->assertSame([1], $ids);
+    }
+
+    public function testFindByQueryBlendsKeywordAndVectorScoresWhenSemanticSearchIsEnabled(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $embeddingProvider->method('embed')->with(['warm jacket'])->willReturn([[0.1, 0.2]]);
+        $client->method('query')->willReturnOnConsecutiveCalls(
+            // Keyword: product 1 scores highest, product 2 not found at all.
+            ['hits' => ['hits' => [['_id' => '1', '_score' => 10.0]], 'max_score' => 10.0]],
+            // Vector: product 2 (a paraphrase match keyword search missed) scores highest.
+            ['hits' => ['hits' => [['_id' => '2', '_score' => 1.8], ['_id' => '1', '_score' => 1.2]]]]
+        );
+
+        $ids = $finder->findByQuery('warm jacket', ['name' => 5], $this->options());
+
+        // keyword-normalized(1) = 10/10 = 1.0; vector-normalized(1) = 1.2/2 = 0.6
+        // combined(1) = 0.4*1.0 + 0.6*0.6 = 0.76
+        // keyword-normalized(2) = 0 (absent); vector-normalized(2) = 1.8/2 = 0.9
+        // combined(2) = 0.4*0 + 0.6*0.9 = 0.54
+        $this->assertSame([1, 2], $ids);
+    }
+
+    public function testFindByQueryFallsBackToKeywordOnlyWhenEmbeddingFails(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $embeddingProvider->method('embed')->willThrowException(new LlmProviderException('boom', true));
+        $client->expects($this->once())->method('query')->willReturn(['hits' => ['hits' => [['_id' => '1', '_score' => 5.0]], 'max_score' => 5.0]]);
+
+        $ids = $finder->findByQuery('warm jacket', ['name' => 5], $this->options());
+
+        $this->assertSame([1], $ids);
+    }
+
+    public function testFindByQueryFallsBackToKeywordOnlyWhenTheVectorQueryThrows(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $embeddingProvider->method('embed')->willReturn([[0.1, 0.2]]);
+        $call = 0;
+        $client->method('query')->willReturnCallback(function () use (&$call) {
+            $call++;
+            if ($call === 1) {
+                return ['hits' => ['hits' => [['_id' => '1', '_score' => 5.0]], 'max_score' => 5.0]];
+            }
+            throw new \RuntimeException('vector index missing');
+        });
+
+        $ids = $finder->findByQuery('warm jacket', ['name' => 5], $this->options());
+
+        $this->assertSame([1], $ids);
+    }
+
+    public function testFindByQueryDoesNotAttemptSemanticSearchForAnEmptyQuery(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $embeddingProvider->expects($this->never())->method('embed');
+        $client->method('query')->willReturn(['hits' => ['hits' => []]]);
+
+        $finder->findByQuery('', [], $this->options());
+    }
+
+    public function testFindByQuerySendsAScriptScoreCosineSimilarityQueryAgainstTheVectorIndex(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $embeddingProvider->method('embed')->willReturn([[0.1, 0.2, 0.3]]);
+        $captured = [];
+        $client->method('query')->willReturnCallback(function (array $params) use (&$captured) {
+            $captured[] = $params;
+            return ['hits' => ['hits' => []]];
+        });
+
+        $finder->findByQuery('warm jacket', ['name' => 5], $this->options(storeId: 7));
+
+        $this->assertCount(2, $captured);
+        $vectorCall = $captured[1];
+        $this->assertSame('prefix_ai_search_vector_1', $vectorCall['index']);
+        $script = $vectorCall['body']['query']['script_score'];
+        $this->assertSame("cosineSimilarity(params.query_vector, 'embedding') + 1.0", $script['script']['source']);
+        $this->assertSame([0.1, 0.2, 0.3], $script['script']['params']['query_vector']);
+        // findByQuery has no terms, so the vector query's base bool is filter-only.
+        $this->assertArrayHasKey('filter', $script['query']['bool']);
+        $this->assertArrayNotHasKey('must', $script['query']['bool']);
+    }
+
+    public function testSearchAppliesTermsAsAHardConstraintOnTheVectorQueryToo(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $embeddingProvider->method('embed')->willReturn([[0.1, 0.2]]);
+        $captured = [];
+        $client->method('query')->willReturnCallback(function (array $params) use (&$captured) {
+            $captured[] = $params;
+            return ['hits' => ['hits' => []]];
+        });
+
+        $finder->search(
+            'warm jacket',
+            ['name' => 5],
+            [['field' => 'color_value', 'query' => 'red', 'boost' => 1.0, 'exclude' => false]],
+            $this->options()
+        );
+
+        $vectorCall = $captured[1];
+        $vectorBool = $vectorCall['body']['query']['script_score']['query']['bool'];
+        // The exists-or-match-wrapped term clause from termsClause() must
+        // be present on the vector query too, not just the keyword one —
+        // otherwise a product violating the color term could leak into
+        // the blended results.
+        $this->assertArrayHasKey('must', $vectorBool);
+        $this->assertArrayHasKey('filter', $vectorBool);
+    }
+
+    public function testSearchDoesNotAttemptSemanticSearchWhenSemanticSearchIsDisabled(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(false);
+        $embeddingProvider->expects($this->never())->method('embed');
+        $client->expects($this->once())->method('query')->willReturn(['hits' => ['hits' => [['_id' => '1']]]]);
+
+        $result = $finder->search('warm jacket', ['name' => 5], [], $this->options());
+
+        $this->assertSame([1], $result->getProductIds());
+    }
+
     private function options(
         int $storeId = 1,
         int $customerGroupId = 0,
@@ -355,7 +505,7 @@ class EngineFinderTest extends TestCase
     }
 
     /**
-     * @return array{0: EngineFinder, 1: ClientInterface&\PHPUnit\Framework\MockObject\MockObject}
+     * @return array{0: EngineFinder, 1: ClientInterface&\PHPUnit\Framework\MockObject\MockObject, 2: SemanticConfig&\PHPUnit\Framework\MockObject\MockObject, 3: EmbeddingProviderInterface&\PHPUnit\Framework\MockObject\MockObject, 4: VectorIndexManager&\PHPUnit\Framework\MockObject\MockObject}
      */
     private function makeFinder(): array
     {
@@ -379,8 +529,30 @@ class EngineFinderTest extends TestCase
                 $data['pricePercentile25'] ?? null
             )
         );
+        // isEnabled() left unstubbed: PHPUnit's mock default for an
+        // unconfigured bool-returning method is false, which is exactly
+        // the desired default (keyword-only) — and leaves each hybrid
+        // test's own ->willReturn(true) as the only configured stub, so
+        // it isn't shadowed by an earlier default (PHPUnit honors the
+        // *first* configured stub when the same method is stubbed twice).
+        $semanticConfig = $this->createMock(SemanticConfig::class);
+        $semanticConfig->method('getKeywordWeight')->willReturn(0.4);
+        $semanticConfig->method('getVectorWeight')->willReturn(0.6);
+        $embeddingProvider = $this->createMock(EmbeddingProviderInterface::class);
+        $vectorIndexManager = $this->createMock(VectorIndexManager::class);
+        $vectorIndexManager->method('getIndexName')->willReturn('prefix_ai_search_vector_1');
 
-        return [new EngineFinder($connectionManager, $indexResolver, $searchResultFactory), $client];
+        $finder = new EngineFinder(
+            $connectionManager,
+            $indexResolver,
+            $searchResultFactory,
+            $semanticConfig,
+            $embeddingProvider,
+            $vectorIndexManager,
+            $this->createMock(\Psr\Log\LoggerInterface::class)
+        );
+
+        return [$finder, $client, $semanticConfig, $embeddingProvider, $vectorIndexManager];
     }
 
     /**

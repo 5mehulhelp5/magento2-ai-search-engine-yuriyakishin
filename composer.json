@@ -32,7 +32,9 @@
         "magento/module-elasticsearch": "*",
         "magento/module-eav": "*",
         "magento/module-catalog": "*",
-        "magento/module-store": "*"
+        "magento/module-catalog-inventory": "*",
+        "magento/module-store": "*",
+        "yu-dev/module-ai-llm": "*"
     },
     "license": [
         "MIT"

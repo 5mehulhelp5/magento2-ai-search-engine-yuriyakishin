@@ -4,7 +4,9 @@
     <module name="Yu_AiSearchEngine">
         <sequence>
             <module name="Magento_Catalog"/>
+            <module name="Magento_CatalogInventory"/>
             <module name="Magento_Elasticsearch"/>
+            <module name="Yu_AiLlm"/>
         </sequence>
     </module>
 </config>

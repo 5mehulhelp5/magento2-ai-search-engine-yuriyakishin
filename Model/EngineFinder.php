@@ -5,9 +5,13 @@ namespace Yu\AiSearchEngine\Model;
 
 use Magento\Elasticsearch\SearchAdapter\ConnectionManager;
 use Magento\Elasticsearch\SearchAdapter\SearchIndexNameResolver;
+use Psr\Log\LoggerInterface;
+use Yu\AiLlm\Api\EmbeddingProviderInterface;
+use Yu\AiLlm\Model\LlmProviderException;
 use Yu\AiSearchEngine\Api\Data\QueryOptionsInterface;
 use Yu\AiSearchEngine\Api\Data\SearchResultInterface;
 use Yu\AiSearchEngine\Api\Data\SearchResultInterfaceFactory;
+use Yu\AiSearchEngine\Model\Indexer\VectorIndexManager;
 
 /**
  * Structured search description -> ordered product IDs (+ optional facet
@@ -27,12 +31,17 @@ class EngineFinder
     public function __construct(
         private readonly ConnectionManager $connectionManager,
         private readonly SearchIndexNameResolver $indexNameResolver,
-        private readonly SearchResultInterfaceFactory $searchResultFactory
+        private readonly SearchResultInterfaceFactory $searchResultFactory,
+        private readonly SemanticConfig $semanticConfig,
+        private readonly EmbeddingProviderInterface $embeddingProvider,
+        private readonly VectorIndexManager $vectorIndexManager,
+        private readonly LoggerInterface $logger
     ) {
     }
 
     /**
-     * Simple mode: one query string across all whitelisted fields.
+     * Simple mode: one query string across all whitelisted fields, blended
+     * with a semantic (vector) match when enabled (see hybridMerge()).
      *
      * @param string $query
      * @param array<string, int> $fieldBoosts es_field => boost
@@ -42,7 +51,11 @@ class EngineFinder
     public function findByQuery(string $query, array $fieldBoosts, QueryOptionsInterface $options): array
     {
         $bool = ['must' => [$this->multiMatchClause($query, $fieldBoosts)]];
-        return $this->extractIds($this->run($bool, $options, []));
+        $keywordResponse = $this->run($bool, $options, []);
+        if ($query === '' || !$this->semanticConfig->isEnabled()) {
+            return $this->extractIds($keywordResponse);
+        }
+        return $this->hybridMerge($query, ['filter' => $this->buildFilter($options)], $keywordResponse, $options);
     }
 
     /**
@@ -87,8 +100,14 @@ class EngineFinder
             $bool['must'] = array_merge($bool['must'] ?? [], [$this->multiMatchClause($query, $fieldBoosts)]);
         }
         $response = $this->run($bool, $options, $facetFields);
+        $productIds = $this->extractIds($response);
+        if ($query !== '' && $this->semanticConfig->isEnabled()) {
+            $baseBool = $this->termsClause($terms);
+            $baseBool['filter'] = $this->buildFilter($options);
+            $productIds = $this->hybridMerge($query, $baseBool, $response, $options);
+        }
         return $this->searchResultFactory->create([
-            'productIds' => $this->extractIds($response),
+            'productIds' => $productIds,
             'facets' => $this->extractFacets($response, $facetFields),
             'pricePercentile25' => $this->extractPricePercentile25($response, $facetFields),
         ]);
@@ -174,11 +193,11 @@ class EngineFinder
     }
 
     /**
-     * @param array<string, mixed> $bool
-     * @param array<string, string> $facetFields
-     * @return array<string, mixed> raw ES response
+     * Hard constraints shared by the keyword and vector queries.
+     *
+     * @return array<int, array<string, mixed>>
      */
-    private function run(array $bool, QueryOptionsInterface $options, array $facetFields): array
+    private function buildFilter(QueryOptionsInterface $options): array
     {
         $filter = [
             ['terms' => ['visibility' => self::VISIBILITY_IN_SEARCH]],
@@ -192,9 +211,6 @@ class EngineFinder
             // stores (int)!IS_SALABLE under this field name, so 0 means IN stock.
             $filter[] = ['term' => ['is_out_of_stock' => 0]];
         }
-        // Same per-group price field Magento's own layered navigation
-        // filters by; precision matches the storefront (reindex lag).
-        $priceField = 'price_' . $options->getCustomerGroupId() . '_' . $options->getWebsiteId();
         if ($options->getPriceMin() !== null || $options->getPriceMax() !== null) {
             $range = [];
             if ($options->getPriceMin() !== null) {
@@ -203,9 +219,124 @@ class EngineFinder
             if ($options->getPriceMax() !== null) {
                 $range['lte'] = $options->getPriceMax();
             }
-            $filter[] = ['range' => [$priceField => $range]];
+            // Same per-group price field Magento's own layered navigation
+            // filters by; precision matches the storefront (reindex lag).
+            $filter[] = ['range' => ['price_' . $options->getCustomerGroupId() . '_' . $options->getWebsiteId() => $range]];
         }
-        $bool['filter'] = $filter;
+        return $filter;
+    }
+
+    /**
+     * Blends keyword + vector results. Falls back to keyword-only on any
+     * embedding/vector-query failure — never throws.
+     *
+     * @param array<string, mixed> $baseBool filter (+ terms, if any) — no multi_match
+     * @param array<string, mixed> $keywordResponse raw ES response
+     * @return int[]
+     */
+    private function hybridMerge(string $query, array $baseBool, array $keywordResponse, QueryOptionsInterface $options): array
+    {
+        try {
+            $vectors = $this->embeddingProvider->embed([$query]);
+        } catch (LlmProviderException $e) {
+            $this->logger->warning('Semantic search embedding failed, falling back to keyword-only: ' . $e->getMessage());
+            return $this->extractIds($keywordResponse);
+        }
+        if (($vectors[0] ?? []) === []) {
+            return $this->extractIds($keywordResponse);
+        }
+        try {
+            $vectorResponse = $this->runVectorQuery($vectors[0], $baseBool, $options);
+        } catch (\Throwable $e) {
+            $this->logger->warning('Semantic search vector query failed, falling back to keyword-only: ' . $e->getMessage());
+            return $this->extractIds($keywordResponse);
+        }
+        return $this->mergeScores($keywordResponse, $vectorResponse, $options->getLimit());
+    }
+
+    /**
+     * @param float[] $queryVector
+     * @param array<string, mixed> $baseBool
+     * @return array<string, mixed> raw ES response
+     */
+    private function runVectorQuery(array $queryVector, array $baseBool, QueryOptionsInterface $options): array
+    {
+        return $this->connectionManager->getConnection()->query([
+            'index' => $this->vectorIndexManager->getIndexName($options->getStoreId()),
+            'body' => [
+                'size' => $options->getLimit(),
+                '_source' => false,
+                'query' => [
+                    'script_score' => [
+                        'query' => ['bool' => $baseBool],
+                        'script' => [
+                            // +1.0: ES requires score >= 0; range becomes [0,2].
+                            'source' => "cosineSimilarity(params.query_vector, 'embedding') + 1.0",
+                            'params' => ['query_vector' => $queryVector],
+                        ],
+                    ],
+                ],
+            ],
+        ]);
+    }
+
+    /**
+     * @param array<string, mixed> $keywordResponse
+     * @param array<string, mixed> $vectorResponse
+     * @return int[]
+     */
+    private function mergeScores(array $keywordResponse, array $vectorResponse, int $limit): array
+    {
+        $keywordScores = $this->normalizeKeywordScores($keywordResponse);
+        $vectorScores = $this->normalizeVectorScores($vectorResponse);
+        $keywordWeight = $this->semanticConfig->getKeywordWeight();
+        $vectorWeight = $this->semanticConfig->getVectorWeight();
+
+        $combined = [];
+        foreach (array_unique(array_merge(array_keys($keywordScores), array_keys($vectorScores))) as $id) {
+            $combined[$id] = $keywordWeight * ($keywordScores[$id] ?? 0.0) + $vectorWeight * ($vectorScores[$id] ?? 0.0);
+        }
+        arsort($combined);
+        return array_map('intval', array_slice(array_keys($combined), 0, $limit));
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     * @return array<int, float> product ID => score in [0,1]
+     */
+    private function normalizeKeywordScores(array $response): array
+    {
+        $maxScore = (float)($response['hits']['max_score'] ?? 0.0);
+        $scores = [];
+        foreach ($response['hits']['hits'] ?? [] as $hit) {
+            $scores[(int)$hit['_id']] = $maxScore > 0.0 ? (float)$hit['_score'] / $maxScore : 0.0;
+        }
+        return $scores;
+    }
+
+    /**
+     * @param array<string, mixed> $response
+     * @return array<int, float> product ID => score in [0,1]
+     */
+    private function normalizeVectorScores(array $response): array
+    {
+        $scores = [];
+        foreach ($response['hits']['hits'] ?? [] as $hit) {
+            // Raw score range is [0,2] — see runVectorQuery().
+            $scores[(int)$hit['_id']] = (float)$hit['_score'] / 2.0;
+        }
+        return $scores;
+    }
+
+    /**
+     * @param array<string, mixed> $bool
+     * @param array<string, string> $facetFields
+     * @return array<string, mixed> raw ES response
+     */
+    private function run(array $bool, QueryOptionsInterface $options, array $facetFields): array
+    {
+        $priceField = 'price_' . $options->getCustomerGroupId() . '_' . $options->getWebsiteId();
+        $bool['filter'] = $this->buildFilter($options);
 
         $body = [
             'size' => $options->getLimit(),

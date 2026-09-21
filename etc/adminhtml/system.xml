@@ -1,0 +1,27 @@
+<?xml version="1.0"?>
+<config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:noNamespaceSchemaLocation="urn:magento:module:Magento_Config:etc/system_file.xsd">
+    <system>
+        <section id="yu_aisearchengine" translate="label" sortOrder="50" showInDefault="1" showInWebsite="1" showInStore="0">
+            <label>Search Engine AI</label>
+            <tab>yu_ai</tab>
+            <resource>Yu_AiSearchEngine::config</resource>
+            <group id="semantic" translate="label" sortOrder="10" showInDefault="1" showInWebsite="1" showInStore="0">
+                <label>Semantic Search</label>
+                <field id="enabled" translate="label comment" type="select" sortOrder="10" showInDefault="1" showInWebsite="1">
+                    <label>Enabled</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Blends keyword search with meaning-based (vector) search using OpenAI embeddings, configured under LLM AI. Turn on only after the "AI Search Vector" indexer (Index Management) has completed at least one full reindex - until then the vector index does not exist and every request silently falls back to keyword-only.</comment>
+                </field>
+                <field id="keyword_weight" translate="label comment" type="text" sortOrder="20" showInDefault="1" showInWebsite="1">
+                    <label>Keyword Score Weight</label>
+                    <comment>0-1. Each score is normalized to [0,1] independently before blending, so the two weights are not required to sum to 1. Default 0.4.</comment>
+                </field>
+                <field id="vector_weight" translate="label comment" type="text" sortOrder="30" showInDefault="1" showInWebsite="1">
+                    <label>Vector Score Weight</label>
+                    <comment>0-1. See Keyword Score Weight. Default 0.6.</comment>
+                </field>
+            </group>
+        </section>
+    </system>
+</config>
