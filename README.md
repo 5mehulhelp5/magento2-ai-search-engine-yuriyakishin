@@ -1,12 +1,13 @@
-# Magento 2 Search Engine — Reliable Filters for AI-Powered Catalog Search
+# Magento 2 Search Engine — Reliable Filters and Semantic (Vector) Search for AI-Powered Catalog Search
 
 An infrastructure module: structured product search that talks directly
 to the store's search engine (Elasticsearch or OpenSearch — whichever is
 configured in Magento), bypassing Magento's standard search-query-building
-layer. It doesn't show anything on the storefront by itself and needs no
-admin configuration — **Yu_AiChat** (product search inside the chat
-assistant) and **Yu_AiCatalogSearch** (AI-powered catalog search) are
-built on top of it.
+layer, with optional semantic (meaning-based) matching blended in. It
+doesn't show anything on the storefront by itself and needs no admin
+configuration for keyword search — **Yu_AiChat** (product search inside
+the chat assistant) and **Yu_AiCatalogSearch** (AI-powered catalog
+search) are built on top of it.
 
 ## Why it exists
 
@@ -43,26 +44,73 @@ AI-generated text.
   searchable or usable in layered navigation, and which of those are
   actually populated in the catalog — nothing needs to be listed
   manually.
+- **Semantic (vector) search, blended with keyword search.** Free-text
+  queries are matched both on literal words and on meaning — a search
+  for "warm winter jacket" can find a product described only as
+  "insulated parka", something keyword matching alone would miss. Off
+  by default; when enabled, the two rankings are blended with
+  configurable weights, and any embedding failure degrades gracefully
+  back to today's keyword-only behavior rather than breaking search.
+
+## Semantic (Vector) Search
+
+Vectors come from `Yu_AiLlm`'s OpenAI embeddings provider (see that
+module's README) and live in a separate, per-store Elasticsearch index
+this module owns and keeps in sync via a native Magento indexer, **AI
+Search Vector** — visible in Index Management, supporting both "Update
+on Save" and "Update by Schedule" like any other Magento indexer.
+
+Turning it on:
+
+1. Configure and enable an embedding-capable LLM provider under
+   **Stores → Configuration → AI → LLM AI** (currently OpenAI).
+2. Run a full reindex of **AI Search Vector**
+   (`bin/magento indexer:reindex yu_aisearchengine_vector`, or via Index
+   Management in the admin panel).
+3. Enable semantic search under **Stores → Configuration → AI → Search
+   Engine AI → Semantic Search** (see Configuration below).
+
+Until step 2 has completed at least once, the vector index doesn't
+exist and every hybrid search request quietly falls back to keyword
+only — turning on Semantic Search before reindexing doesn't break
+anything, it just doesn't do anything yet either.
 
 ## Requirements
 
 - PHP >= 8.1
 - Magento 2.4.x with Elasticsearch/OpenSearch configured (Magento's
-  standard search engine)
+  standard search engine); Elasticsearch 7.x's lack of native
+  approximate kNN is fine at typical catalog sizes — vector scoring
+  runs as a brute-force `script_score` query
+- The `Yu_AiLlm` module (installed automatically as a dependency),
+  needed only for semantic search — keyword search has no LLM
+  dependency at all
 
 ## Installation
 
 ```bash
 composer require yu-dev/module-ai-search-engine
-bin/magento module:enable Yu_AiSearchEngine
+bin/magento module:enable Yu_AiLlm Yu_AiSearchEngine
 bin/magento setup:upgrade
 bin/magento setup:di:compile
 bin/magento cache:flush
 ```
 
-The module needs no admin configuration and doesn't do anything on the
-storefront by itself — it's used by other modules (`Yu_AiChat`,
-`Yu_AiCatalogSearch`), which are installed separately.
+Keyword search needs no admin configuration and works immediately. The
+module doesn't do anything on the storefront by itself — it's used by
+other modules (`Yu_AiChat`, `Yu_AiCatalogSearch`), which are installed
+separately. Semantic search is opt-in — see the Semantic (Vector) Search
+section above.
+
+## Configuration
+
+**Stores → Configuration → AI → Search Engine AI → Semantic Search**
+
+- **Enabled** — the kill switch for hybrid search. Off (default) falls
+  back to keyword-only everywhere.
+- **Keyword Score Weight** / **Vector Score Weight** — blend weights,
+  default 0.4 / 0.6. Each score is normalized to [0,1] independently
+  before blending, so the two weights aren't required to sum to 1.
 
 ## Author
 
