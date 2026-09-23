@@ -7,6 +7,9 @@ namespace Yu\AiSearchEngine\Test\Unit\Model;
 use Magento\AdvancedSearch\Model\Client\ClientInterface;
 use Magento\Elasticsearch\SearchAdapter\ConnectionManager;
 use Magento\Elasticsearch\SearchAdapter\SearchIndexNameResolver;
+use Magento\Framework\App\CacheInterface;
+use Magento\Framework\Search\EngineResolverInterface;
+use Magento\Framework\Serialize\Serializer\Json;
 use PHPUnit\Framework\TestCase;
 use Yu\AiLlm\Api\EmbeddingProviderInterface;
 use Yu\AiLlm\Model\LlmProviderException;
@@ -16,6 +19,7 @@ use Yu\AiSearchEngine\Model\Indexer\VectorIndexManager;
 use Yu\AiSearchEngine\Model\QueryOptions;
 use Yu\AiSearchEngine\Model\SearchResult;
 use Yu\AiSearchEngine\Model\SemanticConfig;
+use Yu\AiSearchEngine\Model\VectorDialect;
 
 class EngineFinderTest extends TestCase
 {
@@ -63,6 +67,21 @@ class EngineFinderTest extends TestCase
         // Excluded terms stay a bare match: a document missing the field
         // already satisfies "not X" on its own, no exists-wrapping needed.
         $this->assertSame(['match' => ['color' => ['query' => 'blue', 'operator' => 'and', 'boost' => 1.0, 'fuzziness' => 'AUTO']]], $bool['must_not'][0]);
+    }
+
+    public function testRequiredTermIsABareMatchSoDocumentsMissingTheFieldAreExcluded(): void
+    {
+        [$finder, $client] = $this->makeFinder();
+        $captured = &$this->captureQuery($client, []);
+
+        $finder->findByTerms([
+            ['field' => 'color', 'query' => 'red', 'boost' => 2.0, 'exclude' => false, 'required' => true],
+        ], $this->options());
+
+        $this->assertSame(
+            ['match' => ['color' => ['query' => 'red', 'operator' => 'and', 'boost' => 2.0, 'fuzziness' => 'AUTO']]],
+            $captured['body']['query']['bool']['must'][0]
+        );
     }
 
     public function testFindByTermsMatchingTermDoesNotExcludeDocumentsMissingTheField(): void
@@ -239,6 +258,9 @@ class EngineFinderTest extends TestCase
             $semanticConfig,
             $this->createMock(EmbeddingProviderInterface::class),
             $this->createMock(VectorIndexManager::class),
+            $this->makeDialect('elasticsearch7'),
+            $this->createMock(CacheInterface::class),
+            new Json(),
             $this->createMock(\Psr\Log\LoggerInterface::class)
         );
         $captured = &$this->captureQuery($client, []);
@@ -303,16 +325,94 @@ class EngineFinderTest extends TestCase
         $this->assertArrayHasKey('bool', $must[0]);
     }
 
-    public function testSearchRequestsAggregationsWhenFacetFieldsGiven(): void
+    public function testSearchDescribesExactlyTheReturnedProductsWhenFacetFieldsGiven(): void
     {
         [$finder, $client] = $this->makeFinder();
-        $captured = &$this->captureQuery($client, []);
+        $captured = [];
+        $responses = [
+            ['hits' => ['hits' => [['_id' => '10'], ['_id' => '11'], ['_id' => '12']], 'total' => ['value' => 300]]],
+            [
+                'hits' => ['hits' => [
+                    ['_id' => '10', 'fields' => ['price_0_1' => [10.0]]],
+                    ['_id' => '11', 'fields' => ['price_0_1' => [20.0]]],
+                    ['_id' => '12', 'fields' => ['price_0_1' => [30.0]]],
+                ]],
+                'aggregations' => ['facet_color' => ['buckets' => [['key' => 5, 'doc_count' => 2], ['key' => 6, 'doc_count' => 1]]]],
+            ],
+        ];
+        $client->method('query')->willReturnCallback(function (array $params) use (&$captured, &$responses) {
+            $captured[] = $params;
+            return array_shift($responses);
+        });
 
-        $finder->search('yoga pants', ['name' => 5], [], $this->options(customerGroupId: 0, websiteId: 1), ['color' => 'color']);
+        $result = $finder->search('yoga pants', ['name' => 5], [], $this->options(), ['color' => 'color']);
 
-        $aggs = $captured['body']['aggs'];
-        $this->assertSame(['field' => 'color', 'size' => 1], $aggs['facet_color']['terms']);
-        $this->assertSame(['field' => 'price_0_1', 'percents' => [25]], $aggs['facet_price']['percentiles']);
+        $this->assertSame([10, 11, 12], $result->getProductIds());
+        // Counts describe the 3 returned products, not the 300 keyword matches.
+        $this->assertSame(3, $result->getTotalCount());
+        $this->assertSame(['color' => ['5' => 2, '6' => 1]], $result->getFacets());
+        $this->assertSame([10 => 10.0, 11 => 20.0, 12 => 30.0], $result->getPrices());
+        $this->assertSame(15.0, $result->getPricePercentile25());
+
+        $this->assertArrayNotHasKey('aggs', $captured[0]['body']);
+        $describe = $captured[1]['body'];
+        $this->assertSame(3, $describe['size']);
+        $this->assertSame(['price_0_1'], $describe['docvalue_fields']);
+        $this->assertSame([['ids' => ['values' => ['10', '11', '12']]]], $describe['query']['bool']['filter']);
+        $this->assertSame(['field' => 'color', 'size' => 20], $describe['aggs']['facet_color']['terms']);
+    }
+
+    public function testSearchStillReturnsProductsWhenTheFacetQueryFails(): void
+    {
+        [$finder, $client] = $this->makeFinder();
+        $call = 0;
+        $client->method('query')->willReturnCallback(function () use (&$call) {
+            if (++$call === 1) {
+                return ['hits' => ['hits' => [['_id' => '10']]]];
+            }
+            throw new \RuntimeException('aggregation failed');
+        });
+
+        $result = $finder->search('yoga pants', ['name' => 5], [], $this->options(), ['color' => 'color']);
+
+        $this->assertSame([10], $result->getProductIds());
+        $this->assertSame([], $result->getFacets());
+    }
+
+    public function testRefineKeepsOnlyMatchingProductsInTheirOriginalOrder(): void
+    {
+        [$finder, $client] = $this->makeFinder();
+        $captured = [];
+        $responses = [
+            // the engine returns matches in its own order
+            ['hits' => ['hits' => [['_id' => '3'], ['_id' => '1']]]],
+            ['hits' => ['hits' => []], 'aggregations' => []],
+        ];
+        $client->method('query')->willReturnCallback(function (array $params) use (&$captured, &$responses) {
+            $captured[] = $params;
+            return array_shift($responses);
+        });
+
+        $result = $finder->refine([1, 2, 3], ['material' => 44], $this->options(categoryId: 7), ['color' => 'color']);
+
+        $this->assertSame([1, 3], $result->getProductIds());
+        $this->assertSame(2, $result->getTotalCount());
+        $filter = $captured[0]['body']['query']['bool']['filter'];
+        $this->assertContains(['ids' => ['values' => ['1', '2', '3']]], $filter);
+        // Exact value on the same field facets count on — no fuzzy text match.
+        $this->assertContains(['term' => ['material' => 44]], $filter);
+        $this->assertContains(['term' => ['category_ids' => 7]], $filter);
+        $this->assertSame(3, $captured[0]['body']['size']);
+        // facets are computed over the kept products
+        $this->assertSame([['ids' => ['values' => ['1', '3']]]], $captured[1]['body']['query']['bool']['filter']);
+    }
+
+    public function testRefineOfNothingQueriesNothing(): void
+    {
+        [$finder, $client] = $this->makeFinder();
+        $client->expects($this->never())->method('query');
+
+        $this->assertSame([], $finder->refine([], ['material' => 44], $this->options(), ['color' => 'color'])->getProductIds());
     }
 
     public function testSearchOmitsAggsClauseWhenNoFacetFieldsGiven(): void
@@ -323,24 +423,6 @@ class EngineFinderTest extends TestCase
         $finder->search('yoga pants', ['name' => 5], [], $this->options());
 
         $this->assertArrayNotHasKey('aggs', $captured['body']);
-    }
-
-    public function testSearchParsesFacetBucketsAndPricePercentileFromResponse(): void
-    {
-        [$finder, $client] = $this->makeFinder();
-        $client->method('query')->willReturn([
-            'hits' => ['hits' => [['_id' => '10']]],
-            'aggregations' => [
-                'facet_color' => ['buckets' => [['key' => 'Red', 'doc_count' => 12]]],
-                'facet_price' => ['values' => ['25.0' => 29.99]],
-            ],
-        ]);
-
-        $result = $finder->search('yoga pants', ['name' => 5], [], $this->options(), ['color' => 'color']);
-
-        $this->assertSame([10], $result->getProductIds());
-        $this->assertSame(['color' => ['Red' => 12]], $result->getFacets());
-        $this->assertSame(29.99, $result->getPricePercentile25());
     }
 
     public function testSearchReturnsEmptyFacetsWhenNoFacetFieldsRequested(): void
@@ -450,7 +532,86 @@ class EngineFinderTest extends TestCase
         $this->assertArrayNotHasKey('must', $script['query']['bool']);
     }
 
-    public function testSearchAppliesTermsAsAHardConstraintOnTheVectorQueryToo(): void
+    public function testSearchDropsVectorHitsThatViolateTheTermsViaTheMainIndex(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $semanticConfig->method('getKeywordWeight')->willReturn(0.4);
+        $semanticConfig->method('getVectorWeight')->willReturn(0.6);
+        $embeddingProvider->method('embed')->willReturn([[0.1, 0.2]]);
+        $captured = [];
+        $responses = [
+            // 1. keyword query (main index, terms applied)
+            ['hits' => ['hits' => [['_id' => '1', '_score' => 4.0]], 'max_score' => 4.0]],
+            // 2. vector query: 2 and 3 are semantically close, only 2 has the term
+            ['hits' => ['hits' => [['_id' => '3', '_score' => 1.9], ['_id' => '2', '_score' => 1.8]]]],
+            // 3. term check of the vector hits against the main index
+            ['hits' => ['hits' => [['_id' => '2']]]],
+        ];
+        $client->method('query')->willReturnCallback(function (array $params) use (&$captured, &$responses) {
+            $captured[] = $params;
+            return array_shift($responses);
+        });
+
+        $result = $finder->search(
+            'warm jacket',
+            ['name' => 5],
+            [['field' => 'color_value', 'query' => 'red', 'boost' => 1.0, 'exclude' => false]],
+            $this->options(limit: 10)
+        );
+
+        // combined(1) = 0.4*1.0 = 0.40; combined(2) = 0.6*(1.8/2) = 0.54;
+        // 3 would score 0.57 but violates the term, so it must be absent.
+        $this->assertSame([2, 1], $result->getProductIds());
+        $this->assertCount(3, $captured);
+
+        // The vector index has no attribute fields: the vector query
+        // carries the shared filters only, over a wider candidate pool.
+        $vectorCall = $captured[1];
+        $this->assertSame(['filter'], array_keys($vectorCall['body']['query']['script_score']['query']['bool']));
+        $this->assertSame(50, $vectorCall['body']['size']);
+
+        // The term check runs on the main index, restricted to the vector hits.
+        $checkCall = $captured[2];
+        $this->assertSame('catalogsearch_fulltext_store_1', $checkCall['index']);
+        $this->assertArrayHasKey('must', $checkCall['body']['query']['bool']);
+        $this->assertSame(
+            [['ids' => ['values' => ['3', '2']]]],
+            $checkCall['body']['query']['bool']['filter']
+        );
+    }
+
+    public function testQueryVectorIsCachedAndReusedForTheSameQuery(): void
+    {
+        $cache = $this->createMock(CacheInterface::class);
+        $saved = [];
+        $cache->method('save')->willReturnCallback(function ($data, $key) use (&$saved) {
+            $saved[$key] = $data;
+            return true;
+        });
+        $cache->method('load')->willReturnCallback(function ($key) use (&$saved) {
+            return $saved[$key] ?? false;
+        });
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder($cache);
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $embeddingProvider->method('getDimensions')->willReturn(3);
+        $embeddingProvider->expects($this->once())->method('embed')->willReturn([[0.1, 0.2, 0.3]]);
+        $vectors = [];
+        $client->method('query')->willReturnCallback(function (array $params) use (&$vectors) {
+            if (isset($params['body']['query']['script_score'])) {
+                $vectors[] = $params['body']['query']['script_score']['script']['params']['query_vector'];
+            }
+            return ['hits' => ['hits' => []]];
+        });
+
+        $finder->findByQuery('warm jacket', ['name' => 5], $this->options());
+        $finder->findByQuery('warm jacket', ['name' => 5], $this->options());
+
+        $this->assertSame([[0.1, 0.2, 0.3], [0.1, 0.2, 0.3]], $vectors);
+        $this->assertCount(1, $saved);
+    }
+
+    public function testSearchWithoutTermsSkipsTheVectorTermCheck(): void
     {
         [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
         $semanticConfig->method('isEnabled')->willReturn(true);
@@ -458,24 +619,40 @@ class EngineFinderTest extends TestCase
         $captured = [];
         $client->method('query')->willReturnCallback(function (array $params) use (&$captured) {
             $captured[] = $params;
-            return ['hits' => ['hits' => []]];
+            return ['hits' => ['hits' => [['_id' => '1', '_score' => 1.0]], 'max_score' => 1.0]];
         });
 
-        $finder->search(
+        $finder->search('warm jacket', ['name' => 5], [], $this->options(limit: 10));
+
+        $this->assertCount(2, $captured);
+        $this->assertSame(10, $captured[1]['body']['size']);
+    }
+
+    public function testSearchFallsBackToKeywordOnlyWhenTheVectorTermCheckFails(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $embeddingProvider->method('embed')->willReturn([[0.1, 0.2]]);
+        $call = 0;
+        $client->method('query')->willReturnCallback(function () use (&$call) {
+            $call++;
+            if ($call === 1) {
+                return ['hits' => ['hits' => [['_id' => '1', '_score' => 5.0]], 'max_score' => 5.0]];
+            }
+            if ($call === 2) {
+                return ['hits' => ['hits' => [['_id' => '9', '_score' => 1.9]]]];
+            }
+            throw new \RuntimeException('main index unavailable');
+        });
+
+        $result = $finder->search(
             'warm jacket',
             ['name' => 5],
             [['field' => 'color_value', 'query' => 'red', 'boost' => 1.0, 'exclude' => false]],
             $this->options()
         );
 
-        $vectorCall = $captured[1];
-        $vectorBool = $vectorCall['body']['query']['script_score']['query']['bool'];
-        // The exists-or-match-wrapped term clause from termsClause() must
-        // be present on the vector query too, not just the keyword one —
-        // otherwise a product violating the color term could leak into
-        // the blended results.
-        $this->assertArrayHasKey('must', $vectorBool);
-        $this->assertArrayHasKey('filter', $vectorBool);
+        $this->assertSame([1], $result->getProductIds());
     }
 
     public function testSearchDoesNotAttemptSemanticSearchWhenSemanticSearchIsDisabled(): void
@@ -504,10 +681,17 @@ class EngineFinderTest extends TestCase
         return new QueryOptions($storeId, $customerGroupId, $websiteId, $limit, $priceMin, $priceMax, $categoryId, $inStockOnly, $sort);
     }
 
+    private function makeDialect(string $engine): VectorDialect
+    {
+        $engineResolver = $this->createMock(EngineResolverInterface::class);
+        $engineResolver->method('getCurrentSearchEngine')->willReturn($engine);
+        return new VectorDialect($engineResolver);
+    }
+
     /**
      * @return array{0: EngineFinder, 1: ClientInterface&\PHPUnit\Framework\MockObject\MockObject, 2: SemanticConfig&\PHPUnit\Framework\MockObject\MockObject, 3: EmbeddingProviderInterface&\PHPUnit\Framework\MockObject\MockObject, 4: VectorIndexManager&\PHPUnit\Framework\MockObject\MockObject}
      */
-    private function makeFinder(): array
+    private function makeFinder(?CacheInterface $cache = null): array
     {
         // ConnectionManager::getConnection() returns whichever ES/OpenSearch
         // version's client is installed -- ClientInterface is the one
@@ -526,7 +710,9 @@ class EngineFinderTest extends TestCase
             static fn (array $data = []): SearchResult => new SearchResult(
                 $data['productIds'] ?? [],
                 $data['facets'] ?? [],
-                $data['pricePercentile25'] ?? null
+                $data['pricePercentile25'] ?? null,
+                $data['totalCount'] ?? 0,
+                $data['prices'] ?? []
             )
         );
         // isEnabled() left unstubbed: PHPUnit's mock default for an
@@ -549,6 +735,9 @@ class EngineFinderTest extends TestCase
             $semanticConfig,
             $embeddingProvider,
             $vectorIndexManager,
+            $this->makeDialect('elasticsearch7'),
+            $cache ?? $this->createMock(CacheInterface::class),
+            new Json(),
             $this->createMock(\Psr\Log\LoggerInterface::class)
         );
 

@@ -3,4 +3,10 @@
         xsi:noNamespaceSchemaLocation="urn:magento:framework:ObjectManager/etc/config.xsd">
     <preference for="Yu\AiSearchEngine\Api\Data\SearchResultInterface" type="Yu\AiSearchEngine\Model\SearchResult"/>
     <preference for="Yu\AiSearchEngine\Api\Data\QueryOptionsInterface" type="Yu\AiSearchEngine\Model\QueryOptions"/>
+    <type name="Magento\Catalog\Model\ResourceModel\Product">
+        <plugin name="yuAiSearchEngineVectorReindex" type="Yu\AiSearchEngine\Plugin\Indexer\VectorReindexPlugin"/>
+    </type>
+    <type name="Magento\Catalog\Model\Product\Action">
+        <plugin name="yuAiSearchEngineVectorReindex" type="Yu\AiSearchEngine\Plugin\Indexer\VectorReindexPlugin"/>
+    </type>
 </config>

@@ -5,6 +5,7 @@ namespace Yu\AiSearchEngine\Model\Indexer;
 
 use Magento\Elasticsearch\SearchAdapter\ConnectionManager;
 use Magento\Elasticsearch\SearchAdapter\SearchIndexNameResolver;
+use Yu\AiSearchEngine\Model\VectorDialect;
 
 /**
  * Owns the per-store vector index's lifecycle: name, create-with-mapping,
@@ -17,7 +18,8 @@ class VectorIndexManager
 
     public function __construct(
         private readonly ConnectionManager $connectionManager,
-        private readonly SearchIndexNameResolver $indexNameResolver
+        private readonly SearchIndexNameResolver $indexNameResolver,
+        private readonly VectorDialect $vectorDialect
     ) {
     }
 
@@ -38,10 +40,7 @@ class VectorIndexManager
             $client->createIndex($indexName, [
                 'mappings' => [
                     'properties' => [
-                        self::EMBEDDING_FIELD => [
-                            'type' => 'dense_vector',
-                            'dims' => $dimensions,
-                        ],
+                        self::EMBEDDING_FIELD => $this->vectorDialect->fieldMapping($dimensions),
                     ],
                 ],
             ]);
@@ -80,7 +79,7 @@ class VectorIndexManager
     private function getExistingDimensions(string $indexName, $client): ?int
     {
         $mapping = $client->getMapping(['index' => $indexName]);
-        $dims = $mapping[$indexName]['mappings']['properties'][self::EMBEDDING_FIELD]['dims'] ?? null;
-        return $dims !== null ? (int)$dims : null;
+        $fieldMapping = $mapping[$indexName]['mappings']['properties'][self::EMBEDDING_FIELD] ?? [];
+        return $this->vectorDialect->dimensionsFromMapping($fieldMapping);
     }
 }

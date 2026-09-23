@@ -8,6 +8,10 @@
                 <keyword_weight>0.4</keyword_weight>
                 <vector_weight>0.6</vector_weight>
             </semantic>
+            <vector_content>
+                <attribute_mode>auto</attribute_mode>
+                <include_categories>1</include_categories>
+            </vector_content>
         </yu_aisearchengine>
     </default>
 </config>

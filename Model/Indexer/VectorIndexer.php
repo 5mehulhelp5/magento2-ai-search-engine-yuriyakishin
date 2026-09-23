@@ -12,15 +12,19 @@ use Magento\Store\Model\StoreManagerInterface;
 use Psr\Log\LoggerInterface;
 use Yu\AiLlm\Api\EmbeddingProviderInterface;
 use Yu\AiLlm\Model\LlmProviderException;
+use Yu\AiSearchEngine\Model\SemanticConfig;
 
 /**
- * Syncs the vector index: embeds name/short description/description and
- * writes the vector alongside the filter fields EngineFinder uses
+ * Syncs the vector index: embeds name, category paths, attribute values
+ * and short description/description (in that order — most meaningful
+ * first, as over-long text is cut from the end) and writes the vector
+ * alongside the filter fields EngineFinder uses
  * (visibility, status, category_ids, is_out_of_stock, per-group/website
  * price). One index per store view.
  */
 class VectorIndexer implements IndexerActionInterface, MviewActionInterface
 {
+    public const INDEXER_ID = 'yu_aisearchengine_vector';
     private const BATCH_SIZE = 100;
 
     public function __construct(
@@ -31,6 +35,10 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
         private readonly EmbeddingProviderInterface $embeddingProvider,
         private readonly VectorIndexManager $indexManager,
         private readonly EmbeddingTextBuilder $textBuilder,
+        private readonly SemanticConfig $semanticConfig,
+        private readonly EmbeddingAttributeResolver $attributeResolver,
+        private readonly AttributeTextProvider $attributeTextProvider,
+        private readonly CategoryPathProvider $categoryPathProvider,
         private readonly LoggerInterface $logger
     ) {
     }
@@ -88,34 +96,51 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
             return;
         }
         $websiteId = (int)$this->storeManager->getStore($storeId)->getWebsiteId();
+        $attributeCodes = $this->attributeResolver->getAttributeCodes($storeId);
+        $includeCategories = $this->semanticConfig->isCategoryEmbeddingEnabled($storeId);
 
         foreach (array_chunk($productIds, self::BATCH_SIZE) as $batch) {
-            $this->reindexBatch($batch, $storeId, $websiteId, $indexName);
+            $this->reindexBatch($batch, $storeId, $websiteId, $indexName, $attributeCodes, $includeCategories);
         }
     }
 
     /**
      * @param int[] $batch
+     * @param string[] $attributeCodes
      */
-    private function reindexBatch(array $batch, int $storeId, int $websiteId, string $indexName): void
-    {
+    private function reindexBatch(
+        array $batch,
+        int $storeId,
+        int $websiteId,
+        string $indexName,
+        array $attributeCodes,
+        bool $includeCategories
+    ): void {
         $collection = $this->productCollectionFactory->create()
-            ->addAttributeToSelect(['name', 'description', 'short_description', 'visibility', 'status'])
+            ->addAttributeToSelect(array_merge(
+                ['name', 'description', 'short_description', 'visibility', 'status'],
+                $attributeCodes
+            ))
             ->addFieldToFilter('entity_id', ['in' => $batch])
             ->setStoreId($storeId);
+        $categoryIds = $this->fetchCategoryIds($batch, $storeId);
 
         $products = [];
         $texts = [];
         foreach ($collection as $product) {
-            $text = $this->textBuilder->build([
-                (string)$product->getName(),
-                (string)$product->getShortDescription(),
-                (string)$product->getDescription(),
-            ]);
+            $productId = (int)$product->getId();
+            $categoryPaths = $includeCategories
+                ? $this->categoryPathProvider->getPaths($categoryIds[$productId] ?? [], $storeId)
+                : [];
+            $text = $this->textBuilder->build(array_merge(
+                [(string)$product->getName()],
+                [$categoryPaths !== [] ? 'Categories: ' . implode('; ', $categoryPaths) : ''],
+                $this->attributeTextProvider->getLines($product, $attributeCodes, $storeId),
+                [(string)$product->getShortDescription(), (string)$product->getDescription()]
+            ));
             if ($text === '') {
                 continue;
             }
-            $productId = (int)$product->getId();
             $products[$productId] = $product;
             $texts[$productId] = $text;
         }
@@ -133,7 +158,6 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
             }
             $productIdsInOrder = array_keys($texts);
             $prices = $this->fetchPrices($productIdsInOrder, $websiteId);
-            $categoryIds = $this->fetchCategoryIds($productIdsInOrder, $storeId);
 
             foreach ($productIdsInOrder as $position => $productId) {
                 $product = $products[$productId];
@@ -210,7 +234,7 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
     /**
      * Anchor-expanded category IDs (same source catalogsearch_fulltext
      * uses) — $product->getCategoryIds() would only give direct
-     * assignments, missing anchor parents like "Women".
+     * assignments, missing anchor parents.
      *
      * @param int[] $productIds
      * @return array<int, int[]> product ID => category IDs

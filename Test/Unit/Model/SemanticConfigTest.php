@@ -40,4 +40,50 @@ class SemanticConfigTest extends TestCase
 
         $this->assertSame(0.6, (new SemanticConfig($scopeConfig))->getVectorWeight());
     }
+
+    public function testGetEmbeddingAttributeModeReadsTheStoreValue(): void
+    {
+        $scopeConfig = $this->createMock(ScopeConfigInterface::class);
+        $scopeConfig->method('getValue')
+            ->with('yu_aisearchengine/vector_content/attribute_mode', ScopeInterface::SCOPE_STORE, 3)
+            ->willReturn('custom');
+
+        $this->assertSame('custom', (new SemanticConfig($scopeConfig))->getEmbeddingAttributeMode(3));
+    }
+
+    public function testGetEmbeddingAttributeModeFallsBackToAutoForUnknownValues(): void
+    {
+        $scopeConfig = $this->createMock(ScopeConfigInterface::class);
+        $scopeConfig->method('getValue')->willReturn(null);
+
+        $this->assertSame('auto', (new SemanticConfig($scopeConfig))->getEmbeddingAttributeMode(1));
+    }
+
+    public function testGetEmbeddingAttributesSplitsTheMultiselectValue(): void
+    {
+        $scopeConfig = $this->createMock(ScopeConfigInterface::class);
+        $scopeConfig->method('getValue')
+            ->with('yu_aisearchengine/vector_content/attributes', ScopeInterface::SCOPE_STORE, 1)
+            ->willReturn('attr_a,attr_b,');
+
+        $this->assertSame(['attr_a', 'attr_b'], (new SemanticConfig($scopeConfig))->getEmbeddingAttributes(1));
+    }
+
+    public function testGetEmbeddingAttributesIsEmptyWhenNothingIsSelected(): void
+    {
+        $scopeConfig = $this->createMock(ScopeConfigInterface::class);
+        $scopeConfig->method('getValue')->willReturn(null);
+
+        $this->assertSame([], (new SemanticConfig($scopeConfig))->getEmbeddingAttributes(1));
+    }
+
+    public function testIsCategoryEmbeddingEnabledReadsTheStoreFlag(): void
+    {
+        $scopeConfig = $this->createMock(ScopeConfigInterface::class);
+        $scopeConfig->method('isSetFlag')
+            ->with('yu_aisearchengine/vector_content/include_categories', ScopeInterface::SCOPE_STORE, 2)
+            ->willReturn(true);
+
+        $this->assertTrue((new SemanticConfig($scopeConfig))->isCategoryEmbeddingEnabled(2));
+    }
 }

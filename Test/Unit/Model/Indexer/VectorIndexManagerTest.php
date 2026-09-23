@@ -7,8 +7,10 @@ namespace Yu\AiSearchEngine\Test\Unit\Model\Indexer;
 use Magento\AdvancedSearch\Model\Client\ClientInterface;
 use Magento\Elasticsearch\SearchAdapter\ConnectionManager;
 use Magento\Elasticsearch\SearchAdapter\SearchIndexNameResolver;
+use Magento\Framework\Search\EngineResolverInterface;
 use PHPUnit\Framework\TestCase;
 use Yu\AiSearchEngine\Model\Indexer\VectorIndexManager;
+use Yu\AiSearchEngine\Model\VectorDialect;
 
 class VectorIndexManagerTest extends TestCase
 {
@@ -31,6 +33,32 @@ class VectorIndexManagerTest extends TestCase
         );
 
         $this->assertSame('prefix_ai_search_vector_1', $manager->ensureIndex(1, 1536));
+    }
+
+    public function testEnsureIndexCreatesIndexWithKnnVectorMappingOnOpenSearch(): void
+    {
+        [$manager, $client, $indexResolver] = $this->makeManager('opensearch');
+        $indexResolver->method('getIndexName')->willReturn('prefix_ai_search_vector_1');
+        $client->method('indexExists')->with('prefix_ai_search_vector_1')->willReturn(false);
+        $client->expects($this->once())->method('createIndex')->with(
+            'prefix_ai_search_vector_1',
+            ['mappings' => ['properties' => ['embedding' => ['type' => 'knn_vector', 'dimension' => 1536]]]]
+        );
+
+        $this->assertSame('prefix_ai_search_vector_1', $manager->ensureIndex(1, 1536));
+    }
+
+    public function testEnsureIndexThrowsWhenExistingOpenSearchDimensionsDifferFromConfiguredModel(): void
+    {
+        [$manager, $client, $indexResolver] = $this->makeManager('opensearch');
+        $indexResolver->method('getIndexName')->willReturn('prefix_ai_search_vector_1');
+        $client->method('indexExists')->willReturn(true);
+        $client->method('getMapping')->willReturn([
+            'prefix_ai_search_vector_1' => ['mappings' => ['properties' => ['embedding' => ['type' => 'knn_vector', 'dimension' => 3072]]]],
+        ]);
+
+        $this->expectException(\RuntimeException::class);
+        $manager->ensureIndex(1, 1536);
     }
 
     public function testEnsureIndexDoesNothingWhenExistingIndexDimensionsMatch(): void
@@ -88,7 +116,7 @@ class VectorIndexManagerTest extends TestCase
     /**
      * @return array{0: VectorIndexManager, 1: ClientInterface&\PHPUnit\Framework\MockObject\MockObject, 2: SearchIndexNameResolver&\PHPUnit\Framework\MockObject\MockObject}
      */
-    private function makeManager(): array
+    private function makeManager(string $engine = 'elasticsearch7'): array
     {
         $client = $this->getMockBuilder(ClientInterface::class)
             ->addMethods(['indexExists', 'createIndex', 'getMapping', 'bulkQuery'])
@@ -97,6 +125,13 @@ class VectorIndexManagerTest extends TestCase
         $connectionManager->method('getConnection')->willReturn($client);
         $indexResolver = $this->createMock(SearchIndexNameResolver::class);
 
-        return [new VectorIndexManager($connectionManager, $indexResolver), $client, $indexResolver];
+        $engineResolver = $this->createMock(EngineResolverInterface::class);
+        $engineResolver->method('getCurrentSearchEngine')->willReturn($engine);
+
+        return [
+            new VectorIndexManager($connectionManager, $indexResolver, new VectorDialect($engineResolver)),
+            $client,
+            $indexResolver,
+        ];
     }
 }

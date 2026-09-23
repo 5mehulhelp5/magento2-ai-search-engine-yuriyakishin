@@ -4,6 +4,10 @@
     <view id="yu_aisearchengine_vector" class="Yu\AiSearchEngine\Model\Indexer\VectorIndexer" group="indexer">
         <subscriptions>
             <table name="catalog_product_entity" entity_column="entity_id"/>
+            <table name="catalog_product_entity_int" entity_column="entity_id"/>
+            <table name="catalog_product_entity_varchar" entity_column="entity_id"/>
+            <table name="catalog_product_entity_text" entity_column="entity_id"/>
+            <table name="catalog_category_product" entity_column="product_id"/>
         </subscriptions>
     </view>
 </config>

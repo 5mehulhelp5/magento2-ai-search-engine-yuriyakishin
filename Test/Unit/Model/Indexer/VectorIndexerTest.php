@@ -11,9 +11,13 @@ use Magento\Store\Model\StoreManagerInterface;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use Yu\AiLlm\Api\EmbeddingProviderInterface;
+use Yu\AiSearchEngine\Model\Indexer\AttributeTextProvider;
+use Yu\AiSearchEngine\Model\Indexer\CategoryPathProvider;
+use Yu\AiSearchEngine\Model\Indexer\EmbeddingAttributeResolver;
 use Yu\AiSearchEngine\Model\Indexer\EmbeddingTextBuilder;
 use Yu\AiSearchEngine\Model\Indexer\VectorIndexer;
 use Yu\AiSearchEngine\Model\Indexer\VectorIndexManager;
+use Yu\AiSearchEngine\Model\SemanticConfig;
 
 class VectorIndexerTest extends TestCase
 {
@@ -90,6 +94,10 @@ class VectorIndexerTest extends TestCase
             $this->createMock(EmbeddingProviderInterface::class),
             $this->createMock(VectorIndexManager::class),
             new EmbeddingTextBuilder(),
+            $this->createMock(SemanticConfig::class),
+            $this->createMock(EmbeddingAttributeResolver::class),
+            $this->createMock(AttributeTextProvider::class),
+            $this->createMock(CategoryPathProvider::class),
             $this->createMock(LoggerInterface::class)
         );
     }

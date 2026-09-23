@@ -22,6 +22,29 @@
                     <comment>0-1. See Keyword Score Weight. Default 0.6.</comment>
                 </field>
             </group>
+            <group id="vector_content" translate="label comment" sortOrder="20" showInDefault="1" showInWebsite="1" showInStore="0">
+                <label>Vector Index Content</label>
+                <comment>What each product's vector is built from, besides its name and descriptions. Changes here take effect only after a full reindex of the "AI Search Vector" indexer.</comment>
+                <field id="include_categories" translate="label comment" type="select" sortOrder="10" showInDefault="1" showInWebsite="1">
+                    <label>Include Category Paths</label>
+                    <source_model>Magento\Config\Model\Config\Source\Yesno</source_model>
+                    <comment>Adds the product's category breadcrumbs (e.g. "Parent > Child"), in the store view's language. Inactive categories are left out.</comment>
+                </field>
+                <field id="attribute_mode" translate="label comment" type="select" sortOrder="20" showInDefault="1" showInWebsite="1">
+                    <label>Include Attributes</label>
+                    <source_model>Yu\AiSearchEngine\Model\Config\Source\EmbeddingAttributeMode</source_model>
+                    <comment>Adds attribute values as "Label: value" lines, using store view labels. Automatic takes the attributes marked Use in Search or Use in Layered Navigation that have dropdown, multiple-select or text values; Yes/No attributes are left out unless selected explicitly. Exact requirements from a query are still enforced by search filters - the vector only adds meaning, it does not filter.</comment>
+                </field>
+                <field id="attributes" translate="label comment" type="multiselect" sortOrder="30" showInDefault="1" showInWebsite="1">
+                    <label>Attributes</label>
+                    <source_model>Yu\AiSearchEngine\Model\Config\Source\EmbeddableAttribute</source_model>
+                    <can_be_empty>1</can_be_empty>
+                    <comment>Descriptive attributes work best - what a product is made of, what it is for, what it looks like. Identifiers, codes and numbers add noise and make results worse. A Yes/No attribute is written as its label, only for products where it is Yes.</comment>
+                    <depends>
+                        <field id="attribute_mode">custom</field>
+                    </depends>
+                </field>
+            </group>
         </section>
     </system>
 </config>
