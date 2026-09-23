@@ -96,7 +96,7 @@ Turning it on:
 1. Configure and enable an embedding-capable LLM provider under
    **Stores → Configuration → AI → LLM AI** (currently OpenAI).
 2. Run a full reindex of **AI Search Vector**
-   (`bin/magento indexer:reindex yu_aisearchengine_vector`, or via Index
+   (`bin/magento indexer:reindex yu_vector_search`, or via Index
    Management in the admin panel).
 3. Enable semantic search under **Stores → Configuration → AI → Search
    Engine AI → Semantic Search** (see Configuration below).
@@ -163,7 +163,7 @@ after the next full reindex of **AI Search Vector**.
   and provides it through that plugin); the module picks the right one
   from the search engine configured in Magento. After switching the store
   from one engine to the other, run a full reindex of
-  `yu_aisearchengine_vector` so the vector index is rebuilt in the new
+  `yu_vector_search` so the vector index is rebuilt in the new
   engine
 - The `Yu_AiLlm` module (installed automatically as a dependency),
   needed only for semantic search - keyword search has no LLM

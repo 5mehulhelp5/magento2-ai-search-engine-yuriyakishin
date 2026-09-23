@@ -111,7 +111,7 @@ class VectorReindexPluginTest extends TestCase
     private function makePlugin(IndexerInterface $indexer): array
     {
         $registry = $this->createMock(IndexerRegistry::class);
-        $registry->method('get')->with('yu_aisearchengine_vector')->willReturn($indexer);
+        $registry->method('get')->with('yu_vector_search')->willReturn($indexer);
         $logger = $this->createMock(LoggerInterface::class);
         return [new VectorReindexPlugin($registry, $logger), $logger];
     }

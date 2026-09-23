@@ -24,7 +24,7 @@ use Yu\AiSearchEngine\Model\SemanticConfig;
  */
 class VectorIndexer implements IndexerActionInterface, MviewActionInterface
 {
-    public const INDEXER_ID = 'yu_aisearchengine_vector';
+    public const INDEXER_ID = 'yu_vector_search';
     private const BATCH_SIZE = 100;
 
     public function __construct(

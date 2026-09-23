@@ -1,7 +1,7 @@
 <?xml version="1.0"?>
 <config xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
         xsi:noNamespaceSchemaLocation="urn:magento:framework:Mview/etc/mview.xsd">
-    <view id="yu_aisearchengine_vector" class="Yu\AiSearchEngine\Model\Indexer\VectorIndexer" group="indexer">
+    <view id="yu_vector_search" class="Yu\AiSearchEngine\Model\Indexer\VectorIndexer" group="indexer">
         <subscriptions>
             <table name="catalog_product_entity" entity_column="entity_id"/>
             <table name="catalog_product_entity_int" entity_column="entity_id"/>

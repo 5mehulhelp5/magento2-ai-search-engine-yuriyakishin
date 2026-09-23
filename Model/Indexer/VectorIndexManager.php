@@ -52,7 +52,7 @@ class VectorIndexManager
             throw new \RuntimeException(sprintf(
                 'Vector index "%s" already has %d-dimension embeddings but the configured embedding'
                 . ' model produces %d dimensions. Delete the index and run a full reindex of'
-                . ' "yu_aisearchengine_vector" to switch embedding models.',
+                . ' "yu_vector_search" to switch embedding models.',
                 $indexName,
                 $existingDims,
                 $dimensions
