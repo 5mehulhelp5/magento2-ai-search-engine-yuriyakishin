@@ -1,8 +1,8 @@
 # Magento 2 Search Engine - Keyword & Semantic (Vector) Product Search
 
-<a href="https://yu.net.ua/" target="_blank" rel="noopener noreferrer"><img alt="Live demo" src="https://img.shields.io/badge/demo-yu.net.ua-2ea44f?style=for-the-badge"></a>
+<a href="https://shop.yu.net.ua/" target="_blank" rel="noopener noreferrer"><img alt="Live demo" src="https://img.shields.io/badge/demo-shop.yu.net.ua-2ea44f?style=for-the-badge"></a>
 
-**🔗 Demo: <a href="https://yu.net.ua/" target="_blank" rel="noopener noreferrer">yu.net.ua</a>**
+**🔗 Demo: <a href="https://shop.yu.net.ua/" target="_blank" rel="noopener noreferrer">shop.yu.net.ua</a>**
 
 An infrastructure module: structured product search that talks directly
 to the store's search engine (Elasticsearch or OpenSearch - whichever is
