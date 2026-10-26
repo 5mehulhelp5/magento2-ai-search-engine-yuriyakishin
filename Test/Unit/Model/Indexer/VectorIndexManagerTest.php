@@ -105,6 +105,33 @@ class VectorIndexManagerTest extends TestCase
         $manager->bulk([['index' => ['_index' => 'x', '_id' => '1']], ['embedding' => [0.1]]]);
     }
 
+    public function testBulkThrowsWhenTheEngineRejectsDocuments(): void
+    {
+        [$manager, $client] = $this->makeManager();
+        $client->method('bulkQuery')->willReturn([
+            'errors' => true,
+            'items' => [
+                ['index' => ['_id' => '1', 'status' => 201]],
+                ['index' => ['_id' => '2', 'status' => 400, 'error' => ['reason' => 'dimension mismatch']]],
+            ],
+        ]);
+
+        $this->expectExceptionMessage('2: dimension mismatch');
+        $manager->bulk([['index' => ['_index' => 'x', '_id' => '2']], ['embedding' => [0.1]]]);
+    }
+
+    public function testBulkIgnoresDeletesOfDocumentsAlreadyGone(): void
+    {
+        [$manager, $client] = $this->makeManager();
+        $client->method('bulkQuery')->willReturn([
+            'errors' => true,
+            'items' => [['delete' => ['_id' => '3', 'status' => 404, 'error' => ['reason' => 'not_found']]]],
+        ]);
+
+        $manager->bulk([['delete' => ['_index' => 'x', '_id' => '3']]]);
+        $this->addToAssertionCount(1);
+    }
+
     public function testBulkDoesNothingForEmptyOperations(): void
     {
         [$manager, $client] = $this->makeManager();

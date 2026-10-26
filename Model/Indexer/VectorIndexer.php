@@ -11,7 +11,6 @@ use Magento\Framework\Mview\ActionInterface as MviewActionInterface;
 use Magento\Store\Model\StoreManagerInterface;
 use Psr\Log\LoggerInterface;
 use Yu\AiLlm\Api\EmbeddingProviderInterface;
-use Yu\AiLlm\Model\LlmProviderException;
 use Yu\AiSearchEngine\Model\SemanticConfig;
 
 /**
@@ -20,7 +19,11 @@ use Yu\AiSearchEngine\Model\SemanticConfig;
  * first, as over-long text is cut from the end) and writes the vector
  * alongside the filter fields EngineFinder uses
  * (visibility, status, category_ids, is_out_of_stock, per-group/website
- * price). One index per store view.
+ * price). One index per store view, holding only the enabled products
+ * of that store's website.
+ *
+ * Failures propagate, so a failed full reindex is reported as failed.
+ * The scheduled (mview) path is the exception, see execute().
  */
 class VectorIndexer implements IndexerActionInterface, MviewActionInterface
 {
@@ -39,6 +42,7 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
         private readonly EmbeddingAttributeResolver $attributeResolver,
         private readonly AttributeTextProvider $attributeTextProvider,
         private readonly CategoryPathProvider $categoryPathProvider,
+        private readonly VectorChangelog $vectorChangelog,
         private readonly LoggerInterface $logger
     ) {
     }
@@ -47,15 +51,19 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
     {
         foreach ($this->storeManager->getStores() as $store) {
             $storeId = (int)$store->getId();
+            // Store first: EAV filters join the store-level value at call time.
             $productIds = array_map(
                 'intval',
                 $this->productCollectionFactory->create()
-                    ->addFieldToFilter('status', 1)
                     ->setStoreId($storeId)
+                    ->addWebsiteFilter([(int)$store->getWebsiteId()])
+                    ->addFieldToFilter('status', 1)
                     ->getAllIds()
             );
             $this->reindexStoreProducts($productIds, $storeId);
-            $this->removeStaleDocuments($productIds, $storeId);
+            // Drops documents of products deleted, disabled or removed from
+            // the website while the index was not kept in sync.
+            $this->indexManager->deleteAllExcept($storeId, $productIds);
         }
     }
 
@@ -75,25 +83,25 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
     }
 
     /**
+     * Mview entry point. Magento runs every view's update in one loop with
+     * no per-view error handling, so a throw here (e.g. the embedding API
+     * being down) would stop all other indexers' scheduled updates too.
+     * Instead the IDs are put back into this indexer's own changelog and
+     * retried on the next cron run.
+     *
      * @param int[] $ids
      */
     public function execute($ids): void
     {
-        $this->executeList($ids);
-    }
-
-    /**
-     * Drops documents of products deleted or disabled while the index was
-     * not being kept in sync; a partial reindex can't see those.
-     *
-     * @param int[] $keepProductIds
-     */
-    private function removeStaleDocuments(array $keepProductIds, int $storeId): void
-    {
+        $productIds = array_map('intval', (array)$ids);
         try {
-            $this->indexManager->deleteAllExcept($storeId, $keepProductIds);
-        } catch (\Exception $e) {
-            $this->logger->error('AI Search Vector indexer: cannot remove stale documents: ' . $e->getMessage());
+            $this->executeList($productIds);
+        } catch (\Throwable $e) {
+            $this->logger->error(
+                'AI Search Vector indexer: update failed, ' . count($productIds)
+                . ' product(s) queued for retry: ' . $e->getMessage()
+            );
+            $this->vectorChangelog->add($productIds);
         }
     }
 
@@ -105,12 +113,7 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
         if ($productIds === []) {
             return;
         }
-        try {
-            $indexName = $this->indexManager->ensureIndex($storeId, $this->embeddingProvider->getDimensions());
-        } catch (LlmProviderException|\RuntimeException $e) {
-            $this->logger->error('AI Search Vector indexer: cannot prepare the vector index: ' . $e->getMessage());
-            return;
-        }
+        $indexName = $this->indexManager->ensureIndex($storeId, $this->embeddingProvider->getDimensions());
         $websiteId = (int)$this->storeManager->getStore($storeId)->getWebsiteId();
         $attributeCodes = $this->attributeResolver->getAttributeCodes($storeId);
         $includeCategories = $this->semanticConfig->isCategoryEmbeddingEnabled($storeId);
@@ -133,12 +136,14 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
         bool $includeCategories
     ): void {
         $collection = $this->productCollectionFactory->create()
+            ->setStoreId($storeId)
+            ->addWebsiteFilter([$websiteId])
             ->addAttributeToSelect(array_merge(
                 ['name', 'description', 'short_description', 'visibility', 'status'],
                 $attributeCodes
             ))
             ->addFieldToFilter('entity_id', ['in' => $batch])
-            ->setStoreId($storeId);
+            ->addFieldToFilter('status', 1);
         $categoryIds = $this->fetchCategoryIds($batch, $storeId);
 
         $products = [];
@@ -161,16 +166,19 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
             $texts[$productId] = $text;
         }
 
-        // Missing from $products (deleted, or no embeddable text) -> remove from index.
+        // Missing from $products (deleted, disabled, not in this website, or
+        // no embeddable text) -> remove from index.
         $missing = array_diff($batch, array_keys($products));
 
         $bulk = [];
         if ($texts !== []) {
-            try {
-                $vectors = $this->embeddingProvider->embed(array_values($texts));
-            } catch (LlmProviderException $e) {
-                $this->logger->error('AI Search Vector indexer: embedding call failed, skipping this batch: ' . $e->getMessage());
-                return;
+            $vectors = $this->embeddingProvider->embed(array_values($texts));
+            if (count($vectors) !== count($texts)) {
+                throw new \RuntimeException(sprintf(
+                    'AI Search Vector indexer: embedding provider returned %d vector(s) for %d text(s).',
+                    count($vectors),
+                    count($texts)
+                ));
             }
             $productIdsInOrder = array_keys($texts);
             $prices = $this->fetchPrices($productIdsInOrder, $websiteId);

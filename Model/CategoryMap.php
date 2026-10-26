@@ -77,11 +77,12 @@ class CategoryMap
     {
         if (!isset($this->mapByStore[$storeId])) {
             $rootCategoryId = (int)$this->storeManager->getStore($storeId)->getRootCategoryId();
+            // Store first: EAV filters join the store-level value at call time.
             $collection = $this->categoryCollectionFactory->create()
+                ->setStoreId($storeId)
                 ->addAttributeToSelect('name')
                 ->addFieldToFilter('is_active', 1)
-                ->addFieldToFilter('parent_id', $rootCategoryId)
-                ->setStoreId($storeId);
+                ->addFieldToFilter('parent_id', $rootCategoryId);
             $map = [];
             foreach ($collection as $category) {
                 $name = trim((string)$category->getName());

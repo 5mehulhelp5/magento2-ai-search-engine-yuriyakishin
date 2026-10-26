@@ -29,6 +29,32 @@ class CategoryMapTest extends TestCase
         $this->assertSame(['Men', 'Women'], $categoryMap->getNames(self::STORE_ID));
     }
 
+    public function testStoreIsSetBeforeFilteringSoStoreLevelActiveFlagsApply(): void
+    {
+        $calls = [];
+        $collection = $this->createMock(Collection::class);
+        foreach (['setStoreId', 'addAttributeToSelect', 'addFieldToFilter'] as $method) {
+            $collection->method($method)->willReturnCallback(
+                function ($argument) use (&$calls, $method, $collection) {
+                    $calls[] = [$method, $argument];
+                    return $collection;
+                }
+            );
+        }
+        $collection->method('getIterator')->willReturn(new \ArrayIterator([]));
+        $collectionFactory = $this->createMock(CollectionFactory::class);
+        $collectionFactory->method('create')->willReturn($collection);
+        $store = $this->createMock(Store::class);
+        $store->method('getRootCategoryId')->willReturn(self::ROOT_CATEGORY_ID);
+        $storeManager = $this->createMock(StoreManagerInterface::class);
+        $storeManager->method('getStore')->willReturn($store);
+
+        (new CategoryMap($collectionFactory, $storeManager, $this->createMock(LayerCategoryConfig::class)))
+            ->getNames(self::STORE_ID);
+
+        $this->assertSame(['setStoreId', self::STORE_ID], $calls[0]);
+    }
+
     public function testResolveIdMatchesNameCaseInsensitively(): void
     {
         [$categoryMap] = $this->makeCategoryMap([

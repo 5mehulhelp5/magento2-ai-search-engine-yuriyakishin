@@ -78,7 +78,7 @@ class EngineFinder
     {
         $bool = ['must' => [$this->multiMatchClause($query, $fieldBoosts)]];
         $keywordResponse = $this->run($bool, $options);
-        if ($query === '' || !$this->semanticConfig->isEnabled()) {
+        if ($query === '' || !$this->semanticConfig->isEnabled($options->getStoreId())) {
             return $this->extractIds($keywordResponse);
         }
         return $this->hybridMerge($query, [], $keywordResponse, $options);
@@ -127,7 +127,7 @@ class EngineFinder
         }
         $response = $this->run($bool, $options);
         $productIds = $this->extractIds($response);
-        if ($query !== '' && $this->semanticConfig->isEnabled()) {
+        if ($query !== '' && $this->semanticConfig->isEnabled($options->getStoreId())) {
             $productIds = $this->hybridMerge($query, $this->termsClause($terms), $response, $options);
         }
         return $this->describe($productIds, $options, $facetFields);
@@ -353,7 +353,8 @@ class EngineFinder
 
     /**
      * Blends keyword + vector results. Falls back to keyword-only on any
-     * embedding/vector-query failure — never throws.
+     * embedding/vector-query failure — never throws. With a price sort,
+     * the blend picks the products and the price decides their order.
      *
      * @param array<string, mixed> $termsBool termsClause() output (must/must_not), empty when there are no terms
      * @param array<string, mixed> $keywordResponse raw ES response
@@ -378,11 +379,46 @@ class EngineFinder
             if ($termsBool !== []) {
                 $vectorResponse = $this->keepTermMatches($vectorResponse, $termsBool, $options);
             }
+            $merged = $this->mergeScores($keywordResponse, $vectorResponse, $options);
+            return $this->orderByPrice($merged, $options);
         } catch (\Throwable $e) {
             $this->logger->warning('Semantic search vector query failed, falling back to keyword-only: ' . $e->getMessage());
             return $this->extractIds($keywordResponse);
         }
-        return $this->mergeScores($keywordResponse, $vectorResponse, $options->getLimit());
+    }
+
+    /**
+     * @param int[] $productIds
+     * @return int[]
+     */
+    private function orderByPrice(array $productIds, QueryOptionsInterface $options): array
+    {
+        $sort = $this->sortClause($options);
+        if ($productIds === [] || $sort === null) {
+            return $productIds;
+        }
+        $response = $this->connectionManager->getConnection()->query([
+            'index' => $this->indexNameResolver->getIndexName($options->getStoreId(), 'catalogsearch_fulltext'),
+            'body' => [
+                'size' => count($productIds),
+                '_source' => false,
+                'query' => ['bool' => ['filter' => [['ids' => ['values' => array_map('strval', $productIds)]]]]],
+                'sort' => $sort,
+            ],
+        ]);
+        return $this->extractIds($response);
+    }
+
+    /**
+     * @return array<int, array<string, string>>|null null = relevance order
+     */
+    private function sortClause(QueryOptionsInterface $options): ?array
+    {
+        return match ($options->getSort()) {
+            QueryOptionsInterface::SORT_PRICE_ASC => [[$this->priceField($options) => 'asc']],
+            QueryOptionsInterface::SORT_PRICE_DESC => [[$this->priceField($options) => 'desc']],
+            default => null,
+        };
     }
 
     /**
@@ -473,19 +509,19 @@ class EngineFinder
      * @param array<string, mixed> $vectorResponse
      * @return int[]
      */
-    private function mergeScores(array $keywordResponse, array $vectorResponse, int $limit): array
+    private function mergeScores(array $keywordResponse, array $vectorResponse, QueryOptionsInterface $options): array
     {
         $keywordScores = $this->normalizeKeywordScores($keywordResponse);
         $vectorScores = $this->normalizeVectorScores($vectorResponse);
-        $keywordWeight = $this->semanticConfig->getKeywordWeight();
-        $vectorWeight = $this->semanticConfig->getVectorWeight();
+        $keywordWeight = $this->semanticConfig->getKeywordWeight($options->getStoreId());
+        $vectorWeight = $this->semanticConfig->getVectorWeight($options->getStoreId());
 
         $combined = [];
         foreach (array_unique(array_merge(array_keys($keywordScores), array_keys($vectorScores))) as $id) {
             $combined[$id] = $keywordWeight * ($keywordScores[$id] ?? 0.0) + $vectorWeight * ($vectorScores[$id] ?? 0.0);
         }
         arsort($combined);
-        return array_map('intval', array_slice(array_keys($combined), 0, $limit));
+        return array_map('intval', array_slice(array_keys($combined), 0, $options->getLimit()));
     }
 
     /**
@@ -522,7 +558,6 @@ class EngineFinder
      */
     private function run(array $bool, QueryOptionsInterface $options): array
     {
-        $priceField = $this->priceField($options);
         $bool['filter'] = $this->buildFilter($options);
 
         $body = [
@@ -530,10 +565,11 @@ class EngineFinder
             '_source' => false,
             'query' => ['bool' => $bool],
         ];
-        if ($options->getSort() === QueryOptionsInterface::SORT_PRICE_ASC) {
-            $body['sort'] = [[$priceField => 'asc']];
-        } elseif ($options->getSort() === QueryOptionsInterface::SORT_PRICE_DESC) {
-            $body['sort'] = [[$priceField => 'desc']];
+        $sort = $this->sortClause($options);
+        if ($sort !== null) {
+            $body['sort'] = $sort;
+            // A field sort skips scoring; hybridMerge() needs the scores.
+            $body['track_scores'] = true;
         }
 
         return $this->connectionManager->getConnection()->query([

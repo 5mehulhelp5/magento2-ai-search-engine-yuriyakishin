@@ -28,19 +28,28 @@ class SemanticConfig
     ) {
     }
 
-    public function isEnabled(): bool
+    /**
+     * @param int|null $storeId null = current store
+     */
+    public function isEnabled(?int $storeId = null): bool
     {
-        return $this->scopeConfig->isSetFlag(self::PATH_ENABLED, ScopeInterface::SCOPE_STORE);
+        return $this->scopeConfig->isSetFlag(self::PATH_ENABLED, ScopeInterface::SCOPE_STORE, $storeId);
     }
 
-    public function getKeywordWeight(): float
+    /**
+     * @param int|null $storeId null = current store
+     */
+    public function getKeywordWeight(?int $storeId = null): float
     {
-        return (float)$this->scopeConfig->getValue(self::PATH_KEYWORD_WEIGHT, ScopeInterface::SCOPE_STORE);
+        return (float)$this->scopeConfig->getValue(self::PATH_KEYWORD_WEIGHT, ScopeInterface::SCOPE_STORE, $storeId);
     }
 
-    public function getVectorWeight(): float
+    /**
+     * @param int|null $storeId null = current store
+     */
+    public function getVectorWeight(?int $storeId = null): float
     {
-        return (float)$this->scopeConfig->getValue(self::PATH_VECTOR_WEIGHT, ScopeInterface::SCOPE_STORE);
+        return (float)$this->scopeConfig->getValue(self::PATH_VECTOR_WEIGHT, ScopeInterface::SCOPE_STORE, $storeId);
     }
 
     /**

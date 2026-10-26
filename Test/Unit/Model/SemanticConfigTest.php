@@ -41,6 +41,22 @@ class SemanticConfigTest extends TestCase
         $this->assertSame(0.6, (new SemanticConfig($scopeConfig))->getVectorWeight());
     }
 
+    public function testBlendSettingsAreReadForTheGivenStore(): void
+    {
+        $scopeConfig = $this->createMock(ScopeConfigInterface::class);
+        $scopeConfig->expects($this->once())->method('isSetFlag')
+            ->with('yu_aisearchengine/semantic/enabled', ScopeInterface::SCOPE_STORE, 3)
+            ->willReturn(true);
+        $scopeConfig->expects($this->exactly(2))->method('getValue')
+            ->with($this->anything(), ScopeInterface::SCOPE_STORE, 3)
+            ->willReturn('0.5');
+        $config = new SemanticConfig($scopeConfig);
+
+        $this->assertTrue($config->isEnabled(3));
+        $this->assertSame(0.5, $config->getKeywordWeight(3));
+        $this->assertSame(0.5, $config->getVectorWeight(3));
+    }
+
     public function testGetEmbeddingAttributeModeReadsTheStoreValue(): void
     {
         $scopeConfig = $this->createMock(ScopeConfigInterface::class);

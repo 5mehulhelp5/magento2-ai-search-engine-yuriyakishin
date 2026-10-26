@@ -71,7 +71,24 @@ class VectorIndexManager
         if ($operations === []) {
             return;
         }
-        $this->connectionManager->getConnection()->bulkQuery(['body' => $operations]);
+        $response = $this->connectionManager->getConnection()->bulkQuery(['body' => $operations]);
+        if (empty($response['errors'])) {
+            return;
+        }
+        $reasons = [];
+        foreach ($response['items'] ?? [] as $item) {
+            $result = reset($item);
+            // 404 = deleting a document that is already gone, expected.
+            if (isset($result['error']) && ($result['status'] ?? 0) !== 404) {
+                $reasons[] = ($result['_id'] ?? '?') . ': ' . ($result['error']['reason'] ?? 'unknown');
+            }
+        }
+        if ($reasons !== []) {
+            throw new \RuntimeException(
+                'Vector index bulk write failed for ' . count($reasons) . ' document(s): '
+                . implode('; ', array_slice($reasons, 0, 5))
+            );
+        }
     }
 
     /**

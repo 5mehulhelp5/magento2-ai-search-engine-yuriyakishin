@@ -229,6 +229,71 @@ class EngineFinderTest extends TestCase
         $finder->findByQuery('x', [], $this->options());
 
         $this->assertArrayNotHasKey('sort', $captured['body']);
+        $this->assertArrayNotHasKey('track_scores', $captured['body']);
+    }
+
+    public function testRunKeepsScoresWhenSortingByPrice(): void
+    {
+        // A field sort returns null scores otherwise, and hybrid blending
+        // would see every keyword hit as score 0.
+        [$finder, $client] = $this->makeFinder();
+        $captured = &$this->captureQuery($client, []);
+
+        $finder->findByQuery('x', [], $this->options(sort: QueryOptions::SORT_PRICE_ASC));
+
+        $this->assertTrue($captured['body']['track_scores']);
+    }
+
+    public function testHybridResultsFollowThePriceSortNotTheBlendedScore(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $embeddingProvider->method('embed')->willReturn([[0.1, 0.2]]);
+        $captured = [];
+        $responses = [
+            // Keyword: blended order would be 1, 2.
+            ['hits' => ['hits' => [['_id' => '1', '_score' => 10.0]], 'max_score' => 10.0]],
+            ['hits' => ['hits' => [['_id' => '2', '_score' => 1.8], ['_id' => '1', '_score' => 1.2]]]],
+            // Price order of the blended products: 2 is cheaper.
+            ['hits' => ['hits' => [['_id' => '2'], ['_id' => '1']]]],
+        ];
+        $client->method('query')->willReturnCallback(function (array $params) use (&$captured, &$responses) {
+            $captured[] = $params;
+            return array_shift($responses);
+        });
+
+        $ids = $finder->findByQuery(
+            'warm jacket',
+            ['name' => 5],
+            $this->options(customerGroupId: 1, websiteId: 1, sort: QueryOptions::SORT_PRICE_ASC)
+        );
+
+        $this->assertSame([2, 1], $ids);
+        $this->assertSame([['price_1_1' => 'asc']], $captured[2]['body']['sort']);
+        $this->assertSame(['1', '2'], $captured[2]['body']['query']['bool']['filter'][0]['ids']['values']);
+    }
+
+    public function testSemanticSettingsAreReadForTheSearchedStore(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->expects($this->once())->method('isEnabled')->with(4)->willReturn(true);
+        $embeddingProvider->method('embed')->willReturn([[0.1, 0.2]]);
+        $client->method('query')->willReturn(['hits' => ['hits' => []]]);
+
+        $finder->findByQuery('warm jacket', ['name' => 5], $this->options(storeId: 4));
+    }
+
+    public function testHybridResultsSortedByRelevanceNeedNoPriceQuery(): void
+    {
+        [$finder, $client, $semanticConfig, $embeddingProvider] = $this->makeFinder();
+        $semanticConfig->method('isEnabled')->willReturn(true);
+        $embeddingProvider->method('embed')->willReturn([[0.1, 0.2]]);
+        $client->expects($this->exactly(2))->method('query')->willReturnOnConsecutiveCalls(
+            ['hits' => ['hits' => [['_id' => '1', '_score' => 10.0]], 'max_score' => 10.0]],
+            ['hits' => ['hits' => [['_id' => '2', '_score' => 1.8]]]]
+        );
+
+        $finder->findByQuery('warm jacket', ['name' => 5], $this->options());
     }
 
     public function testRunUsesLimitAndDisablesSourceFetching(): void
