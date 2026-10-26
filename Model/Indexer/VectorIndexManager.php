@@ -9,12 +9,13 @@ use Yu\AiSearchEngine\Model\VectorDialect;
 
 /**
  * Owns the per-store vector index's lifecycle: name, create-with-mapping,
- * dimension-mismatch guard, bulk write.
+ * dimension-mismatch guard, bulk write, stale-document cleanup.
  */
 class VectorIndexManager
 {
     private const ENTITY_TYPE = 'ai_search_vector';
     private const EMBEDDING_FIELD = 'embedding';
+    private const DELETE_PAGE_SIZE = 1000;
 
     public function __construct(
         private readonly ConnectionManager $connectionManager,
@@ -71,6 +72,47 @@ class VectorIndexManager
             return;
         }
         $this->connectionManager->getConnection()->bulkQuery(['body' => $operations]);
+    }
+
+    /**
+     * Deletes every document whose ID is not in $keepProductIds.
+     * Deletes are refreshed before the next page is fetched, so a page
+     * never returns IDs already deleted; a page with no progress stops
+     * the loop instead of spinning on a failed bulk.
+     *
+     * @param int[] $keepProductIds
+     */
+    public function deleteAllExcept(int $storeId, array $keepProductIds): void
+    {
+        $indexName = $this->getIndexName($storeId);
+        $client = $this->connectionManager->getConnection();
+        if (!$client->indexExists($indexName)) {
+            return;
+        }
+        $keepIds = array_map('strval', array_values($keepProductIds));
+        $deleted = [];
+
+        while (true) {
+            $response = $client->query([
+                'index' => $indexName,
+                'body' => [
+                    'size' => self::DELETE_PAGE_SIZE,
+                    '_source' => false,
+                    'query' => ['bool' => ['must_not' => [['ids' => ['values' => $keepIds]]]]],
+                ],
+            ]);
+            $ids = array_column($response['hits']['hits'] ?? [], '_id');
+            $ids = array_diff($ids, array_keys($deleted));
+            if ($ids === []) {
+                return;
+            }
+            $operations = [];
+            foreach ($ids as $id) {
+                $operations[] = ['delete' => ['_index' => $indexName, '_id' => $id]];
+                $deleted[$id] = true;
+            }
+            $client->bulkQuery(['body' => $operations, 'refresh' => true]);
+        }
     }
 
     /**

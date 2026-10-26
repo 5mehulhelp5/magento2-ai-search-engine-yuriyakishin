@@ -33,6 +33,7 @@
         "magento/module-eav": "*",
         "magento/module-catalog": "*",
         "magento/module-catalog-inventory": "*",
+        "magento/module-catalog-search": "*",
         "magento/module-store": "*",
         "yu-dev/module-ai-llm": "*"
     },

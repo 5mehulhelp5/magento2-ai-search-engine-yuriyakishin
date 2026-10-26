@@ -113,13 +113,62 @@ class VectorIndexManagerTest extends TestCase
         $manager->bulk([]);
     }
 
+    public function testDeleteAllExceptDeletesEveryDocumentOutsideTheKeptIds(): void
+    {
+        [$manager, $client, $indexResolver] = $this->makeManager();
+        $indexResolver->method('getIndexName')->willReturn('prefix_ai_search_vector_1');
+        $client->method('indexExists')->willReturn(true);
+        $client->expects($this->exactly(2))->method('query')
+            ->with($this->callback(function (array $query): bool {
+                return $query['index'] === 'prefix_ai_search_vector_1'
+                    && $query['body']['_source'] === false
+                    && $query['body']['query'] === ['bool' => ['must_not' => [['ids' => ['values' => ['1', '2']]]]]];
+            }))
+            ->willReturnOnConsecutiveCalls(
+                ['hits' => ['hits' => [['_id' => '5'], ['_id' => '9']]]],
+                ['hits' => ['hits' => []]]
+            );
+        $client->expects($this->once())->method('bulkQuery')->with([
+            'body' => [
+                ['delete' => ['_index' => 'prefix_ai_search_vector_1', '_id' => '5']],
+                ['delete' => ['_index' => 'prefix_ai_search_vector_1', '_id' => '9']],
+            ],
+            'refresh' => true,
+        ]);
+
+        $manager->deleteAllExcept(1, [1, 2]);
+    }
+
+    public function testDeleteAllExceptStopsWhenDeletedDocumentsKeepComingBack(): void
+    {
+        [$manager, $client, $indexResolver] = $this->makeManager();
+        $indexResolver->method('getIndexName')->willReturn('prefix_ai_search_vector_1');
+        $client->method('indexExists')->willReturn(true);
+        $client->expects($this->exactly(2))->method('query')
+            ->willReturn(['hits' => ['hits' => [['_id' => '5']]]]);
+        $client->expects($this->once())->method('bulkQuery');
+
+        $manager->deleteAllExcept(1, [1]);
+    }
+
+    public function testDeleteAllExceptDoesNothingWhenTheIndexDoesNotExist(): void
+    {
+        [$manager, $client, $indexResolver] = $this->makeManager();
+        $indexResolver->method('getIndexName')->willReturn('prefix_ai_search_vector_1');
+        $client->method('indexExists')->willReturn(false);
+        $client->expects($this->never())->method('query');
+        $client->expects($this->never())->method('bulkQuery');
+
+        $manager->deleteAllExcept(1, [1]);
+    }
+
     /**
      * @return array{0: VectorIndexManager, 1: ClientInterface&\PHPUnit\Framework\MockObject\MockObject, 2: SearchIndexNameResolver&\PHPUnit\Framework\MockObject\MockObject}
      */
     private function makeManager(string $engine = 'elasticsearch7'): array
     {
         $client = $this->getMockBuilder(ClientInterface::class)
-            ->addMethods(['indexExists', 'createIndex', 'getMapping', 'bulkQuery'])
+            ->addMethods(['indexExists', 'createIndex', 'getMapping', 'bulkQuery', 'query'])
             ->getMockForAbstractClass();
         $connectionManager = $this->createMock(ConnectionManager::class);
         $connectionManager->method('getConnection')->willReturn($client);

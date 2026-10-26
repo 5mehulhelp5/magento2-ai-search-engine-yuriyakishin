@@ -4,62 +4,61 @@ declare(strict_types=1);
 
 namespace Yu\AiSearchEngine\Test\Unit\Plugin\Indexer;
 
-use Magento\Catalog\Model\Product\Action as ProductAction;
-use Magento\Catalog\Model\ResourceModel\Product as ProductResource;
+use Magento\CatalogSearch\Model\Indexer\Fulltext;
+use Magento\Framework\App\ResourceConnection;
+use Magento\Framework\DB\Adapter\AdapterInterface;
 use Magento\Framework\Indexer\IndexerInterface;
 use Magento\Framework\Indexer\IndexerRegistry;
-use Magento\Framework\Model\AbstractModel;
+use Magento\Framework\Mview\View\ChangelogInterface;
+use Magento\Framework\Mview\ViewInterface;
 use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 use Yu\AiSearchEngine\Plugin\Indexer\VectorReindexPlugin;
 
 class VectorReindexPluginTest extends TestCase
 {
-    public function testSaveReindexesTheProductAfterCommit(): void
+    public function testFulltextListReindexIsFollowedOnSaveMode(): void
+    {
+        $indexer = $this->makeIndexer(scheduled: false, valid: true);
+        $indexer->expects($this->once())->method('reindexList')->with([1, 2]);
+        [$plugin] = $this->makePlugin($indexer);
+
+        $this->assertNull($plugin->afterExecuteList($this->makeFulltext(), null, [1, '2', 2]));
+    }
+
+    public function testFulltextRowReindexIsFollowedOnSaveMode(): void
     {
         $indexer = $this->makeIndexer(scheduled: false, valid: true);
         $indexer->expects($this->once())->method('reindexList')->with([42]);
         [$plugin] = $this->makePlugin($indexer);
-        $resource = $this->makeResourceRunningCommitCallbacks();
 
-        $result = $plugin->aroundSave($resource, fn() => $resource, $this->makeProduct(42));
-
-        $this->assertSame($resource, $result);
+        $plugin->afterExecuteRow($this->makeFulltext(), null, '42');
     }
 
-    public function testDeleteReindexesTheProductAfterCommitSoItIsRemovedFromTheIndex(): void
+    public function testFulltextExecuteIsFollowedOnSaveMode(): void
     {
         $indexer = $this->makeIndexer(scheduled: false, valid: true);
-        $indexer->expects($this->once())->method('reindexList')->with([42]);
+        $indexer->expects($this->once())->method('reindexList')->with([7]);
         [$plugin] = $this->makePlugin($indexer);
-        $resource = $this->makeResourceRunningCommitCallbacks();
 
-        $plugin->aroundDelete($resource, fn() => $resource, $this->makeProduct(42));
+        $plugin->afterExecute($this->makeFulltext(), null, [7]);
     }
 
-    public function testNothingIsReindexedWhenTheSaveFailsAndTheErrorIsRethrown(): void
-    {
-        $indexer = $this->makeIndexer(scheduled: false, valid: true);
-        $indexer->expects($this->never())->method('reindexList');
-        [$plugin] = $this->makePlugin($indexer);
-        $resource = $this->createMock(ProductResource::class);
-        $resource->expects($this->once())->method('rollBack');
-        $resource->expects($this->never())->method('commit');
-
-        $this->expectException(\RuntimeException::class);
-        $plugin->aroundSave($resource, function () {
-            throw new \RuntimeException('save failed');
-        }, $this->makeProduct(42));
-    }
-
-    public function testScheduledModeLeavesUpdatesToMview(): void
+    public function testScheduledModeWritesIdsToTheVectorChangelogInsteadOfReindexing(): void
     {
         $indexer = $this->makeIndexer(scheduled: true, valid: true);
         $indexer->expects($this->never())->method('reindexList');
-        [$plugin] = $this->makePlugin($indexer);
-        $action = $this->createMock(ProductAction::class);
+        $changelog = $this->createMock(ChangelogInterface::class);
+        $changelog->method('getName')->willReturn('yu_vector_search_cl');
+        $changelog->method('getColumnName')->willReturn('entity_id');
+        $view = $this->createMock(ViewInterface::class);
+        $view->method('getChangelog')->willReturn($changelog);
+        $indexer->method('getView')->willReturn($view);
+        [$plugin, , $connection] = $this->makePlugin($indexer);
+        $connection->expects($this->once())->method('insertArray')
+            ->with('prefixed_yu_vector_search_cl', ['entity_id'], [1, 2]);
 
-        $plugin->afterUpdateAttributes($action, $action, [1, 2], [], 0);
+        $plugin->afterExecuteList($this->makeFulltext(), null, [1, 2]);
     }
 
     public function testNotReindexedBeforeTheFirstFullReindex(): void
@@ -67,20 +66,21 @@ class VectorReindexPluginTest extends TestCase
         $indexer = $this->makeIndexer(scheduled: false, valid: false);
         $indexer->expects($this->never())->method('reindexList');
         [$plugin] = $this->makePlugin($indexer);
-        $action = $this->createMock(ProductAction::class);
 
-        $plugin->afterUpdateAttributes($action, $action, [1], [], 0);
+        $plugin->afterExecuteList($this->makeFulltext(), null, [1]);
     }
 
-    public function testMassActionsReindexTheAffectedProductsOnce(): void
+    public function testEmptyIdListDoesNothing(): void
     {
-        $indexer = $this->makeIndexer(scheduled: false, valid: true);
-        $indexer->expects($this->exactly(2))->method('reindexList')->with([1, 2]);
-        [$plugin] = $this->makePlugin($indexer);
-        $action = $this->createMock(ProductAction::class);
+        $registry = $this->createMock(IndexerRegistry::class);
+        $registry->expects($this->never())->method('get');
+        $plugin = new VectorReindexPlugin(
+            $registry,
+            $this->createMock(ResourceConnection::class),
+            $this->createMock(LoggerInterface::class)
+        );
 
-        $this->assertSame($action, $plugin->afterUpdateAttributes($action, $action, [1, 2, 2], [], 0));
-        $this->assertNull($plugin->afterUpdateWebsites($action, null, ['1', '2'], [1], 'add'));
+        $plugin->afterExecuteList($this->makeFulltext(), null, []);
     }
 
     public function testIndexerFailureIsLoggedNotThrown(): void
@@ -89,9 +89,8 @@ class VectorReindexPluginTest extends TestCase
         $indexer->method('reindexList')->willThrowException(new \RuntimeException('search engine down'));
         [$plugin, $logger] = $this->makePlugin($indexer);
         $logger->expects($this->once())->method('error')->with($this->stringContains('search engine down'));
-        $action = $this->createMock(ProductAction::class);
 
-        $plugin->afterUpdateAttributes($action, $action, [1], [], 0);
+        $this->assertSame('result', $plugin->afterExecuteList($this->makeFulltext(), 'result', [1]));
     }
 
     /**
@@ -106,42 +105,26 @@ class VectorReindexPluginTest extends TestCase
     }
 
     /**
-     * @return array{0: VectorReindexPlugin, 1: LoggerInterface&\PHPUnit\Framework\MockObject\MockObject}
+     * @return array{
+     *     0: VectorReindexPlugin,
+     *     1: LoggerInterface&\PHPUnit\Framework\MockObject\MockObject,
+     *     2: AdapterInterface&\PHPUnit\Framework\MockObject\MockObject
+     * }
      */
     private function makePlugin(IndexerInterface $indexer): array
     {
         $registry = $this->createMock(IndexerRegistry::class);
         $registry->method('get')->with('yu_vector_search')->willReturn($indexer);
+        $connection = $this->createMock(AdapterInterface::class);
+        $resource = $this->createMock(ResourceConnection::class);
+        $resource->method('getConnection')->willReturn($connection);
+        $resource->method('getTableName')->willReturnCallback(fn(string $name) => 'prefixed_' . $name);
         $logger = $this->createMock(LoggerInterface::class);
-        return [new VectorReindexPlugin($registry, $logger), $logger];
+        return [new VectorReindexPlugin($registry, $resource, $logger), $logger, $connection];
     }
 
-    /**
-     * @return ProductResource&\PHPUnit\Framework\MockObject\MockObject
-     */
-    private function makeResourceRunningCommitCallbacks(): ProductResource
+    private function makeFulltext(): Fulltext
     {
-        $callbacks = [];
-        $resource = $this->createMock(ProductResource::class);
-        $resource->method('addCommitCallback')->willReturnCallback(
-            function (callable $callback) use (&$callbacks, &$resource) {
-                $callbacks[] = $callback;
-                return $resource;
-            }
-        );
-        $resource->method('commit')->willReturnCallback(function () use (&$callbacks, &$resource) {
-            foreach ($callbacks as $callback) {
-                $callback();
-            }
-            return $resource;
-        });
-        return $resource;
-    }
-
-    private function makeProduct(int $id): AbstractModel
-    {
-        $product = $this->createMock(AbstractModel::class);
-        $product->method('getId')->willReturn($id);
-        return $product;
+        return $this->createMock(Fulltext::class);
     }
 }

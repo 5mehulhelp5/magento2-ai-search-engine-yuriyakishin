@@ -55,6 +55,7 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
                     ->getAllIds()
             );
             $this->reindexStoreProducts($productIds, $storeId);
+            $this->removeStaleDocuments($productIds, $storeId);
         }
     }
 
@@ -79,6 +80,21 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
     public function execute($ids): void
     {
         $this->executeList($ids);
+    }
+
+    /**
+     * Drops documents of products deleted or disabled while the index was
+     * not being kept in sync; a partial reindex can't see those.
+     *
+     * @param int[] $keepProductIds
+     */
+    private function removeStaleDocuments(array $keepProductIds, int $storeId): void
+    {
+        try {
+            $this->indexManager->deleteAllExcept($storeId, $keepProductIds);
+        } catch (\Exception $e) {
+            $this->logger->error('AI Search Vector indexer: cannot remove stale documents: ' . $e->getMessage());
+        }
     }
 
     /**
@@ -162,12 +178,14 @@ class VectorIndexer implements IndexerActionInterface, MviewActionInterface
             foreach ($productIdsInOrder as $position => $productId) {
                 $product = $products[$productId];
                 $bulk[] = ['index' => ['_index' => $indexName, '_id' => (string)$productId]];
+                // getProductStockStatus(), not getStockItem(): with MSI it returns
+                // salability in the website's stock, the stock item only the default source.
                 $bulk[] = $this->buildDocument(
                     $vectors[$position],
                     (int)$product->getVisibility(),
                     (int)$product->getStatus(),
                     $categoryIds[$productId] ?? [],
-                    (bool)$this->stockRegistry->getStockItem($productId)->getIsInStock(),
+                    (bool)$this->stockRegistry->getProductStockStatus($productId, $websiteId),
                     $prices[$productId] ?? [],
                     $websiteId
                 );

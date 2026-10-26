@@ -66,13 +66,29 @@ this module owns and keeps in sync via a native Magento indexer, **AI
 Search Vector** - visible in Index Management, supporting both "Update
 on Save" and "Update by Schedule" like any other Magento indexer.
 
-In "Update on Save" mode, a product's vector is refreshed right after
-the product is saved or deleted in the admin panel, and after the mass
-"Update Attributes" / "Update Websites" actions. Computing a vector
+The vector index refreshes a product whenever Magento's own **Catalog
+Search** index refreshes it. Magento already tells Catalog Search about
+every change that matters for search, so the vector index gets the same
+list for free:
+
+- a product is saved or deleted in the admin panel, or changed by the
+  mass "Update Attributes" / "Update Websites" actions;
+- a product is assigned to or removed from a category;
+- a product's price changes;
+- a product goes out of stock or comes back in stock - whether stock is
+  edited by hand, through the API, or changes because an order was
+  placed or canceled. This works with and without Multi-Source
+  Inventory (MSI); with MSI, "in stock" means "salable in the stock
+  assigned to the website", exactly as on the storefront.
+
+This happens in both indexer modes, and the two indexers don't have to
+use the same mode. In "Update by Schedule" mode the product is only
+queued and cron refreshes it in the background a minute or so later. In
+"Update on Save" mode it's refreshed immediately. Computing a vector
 means a call to the embedding API, so a product save takes roughly a
 second longer; on large catalogs or frequent bulk edits "Update by
-Schedule" (done in the background by cron) is the better choice. Two
-safety rules apply to "Update on Save":
+Schedule" is the better choice. Two safety rules apply to "Update on
+Save":
 
 - Nothing happens until the index has been fully built at least once
   (the indexer shows "Ready") - so a store that hasn't set up semantic
@@ -82,6 +98,16 @@ safety rules apply to "Update on Save":
   still saved - the vector index never blocks catalog editing. The
   product's vector simply stays as it was until the next save or full
   reindex.
+
+A full reindex also cleans up: products that were deleted or disabled
+while the index wasn't being kept in sync (for example, the indexer was
+switched off, or products were removed with a direct database script)
+are removed from the vector index, so they can never show up in search
+results.
+
+Note: on recent Magento versions, switching the indexer between "Update
+on Save" and "Update by Schedule" marks it as "Reindex required" - run
+a full reindex after changing the mode.
 
 How the two result lists are combined: keyword search finds the
 products that literally match the query and every attribute requirement
